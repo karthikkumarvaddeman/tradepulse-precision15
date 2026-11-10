@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TradePulse Precision 15</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b1220; --panel:#121e31; --border:#26364e; --muted:#94a3b8; --text:#e5edf8; --green:#20c997; --red:#fb7185; --amber:#fbbf24; }
+    * { box-sizing:border-box; } body { margin:0; font:15px/1.5 Segoe UI,Arial,sans-serif; background:var(--bg); color:var(--text); }
+    main { max-width:1100px; margin:auto; padding:28px 18px 60px; } header { display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
+    h1 { margin:0; font-size:26px; } .sub,.muted { color:var(--muted); } .pill { border:1px solid var(--border); border-radius:999px; padding:5px 11px; font-size:12px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; margin-top:22px; }
+    .card { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:18px; }
+    .status { font-size:20px; font-weight:700; margin:8px 0; } .warning { color:var(--amber); } .ok { color:var(--green); }
+    .row { display:flex; justify-content:space-between; gap:14px; padding:8px 0; border-bottom:1px solid var(--border); } .row:last-child { border:0; }
+    code { color:#c4b5fd; } a { color:#93c5fd; } .notice { margin-top:18px; border-left:3px solid var(--amber); padding:12px 14px; background:#241e13; border-radius:6px; }
+    button { border:0; padding:10px 14px; border-radius:8px; background:#334155; color:white; font-weight:600; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>TradePulse Precision 15</h1><div class="sub">NIFTY + SENSEX · 15-minute signals · human approval</div></div>
+    <span class="pill warning">PAPER / SETUP MODE</span>
+  </header>
+  <div class="grid">
+    <section class="card"><div class="muted">NIFTY</div><div class="status">WAITING FOR DATA</div><div class="muted">No live recommendation is available until the Kite market-data adapter is implemented.</div></section>
+    <section class="card"><div class="muted">SENSEX</div><div class="status">WAITING FOR DATA</div><div class="muted">No live recommendation is available until the Kite market-data adapter is implemented.</div></section>
+  </div>
+  <section class="card" style="margin-top:14px">
+    <h2 style="margin-top:0">System readiness</h2>
+    <div id="health">Checking local service…</div>
+    <div class="row"><span>Strategy</span><strong>Precision 15 · score threshold 85</strong></div>
+    <div class="row"><span>Daily limit</span><strong>Maximum 2 signals across both indices</strong></div>
+    <div class="row"><span>Risk</span><strong>0.5% per trade · 1.5% daily loss</strong></div>
+    <div class="row"><span>Execution</span><strong>Human approval required · live orders disabled</strong></div>
+  </section>
+  <div class="notice"><strong>Not live-connected:</strong> this is a clean starter project for Devin to complete. It does not fetch live data, generate actionable live signals, or place orders. Do not use it for live trading in its current state.</div>
+  <p class="muted">Telegram alerts are configured in the backend after Devin completes the notifier wiring. Telegram messages are informational only; approval belongs in this local dashboard.</p>
+</main>
+<script>
+fetch('/api/health').then(r=>r.json()).then(h=>{
+  document.getElementById('health').innerHTML = `<div class="row"><span>Application</span><strong>${h.status}</strong></div><div class="row"><span>Mode</span><strong>${h.mode}</strong></div><div class="row"><span>Capital configured</span><strong>${h.capitalConfigured ? 'Yes' : 'No — set TRADING_CAPITAL_INR'}</strong></div><div class="row"><span>Live market data</span><strong>${h.liveMarketDataConfigured ? 'Connected' : 'Not configured'}</strong></div><div class="row"><span>Live order placement</span><strong>${h.liveOrderPlacementEnabled ? 'Enabled' : 'Disabled'}</strong></div>`;
+}).catch(()=>{ document.getElementById('health').textContent='Backend unavailable. Start with npm run dev.'; });
+</script>
+</body>
+</html>

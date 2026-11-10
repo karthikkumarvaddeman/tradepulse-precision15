@@ -1,0 +1,25 @@
+import "dotenv/config";
+import { z } from "zod";
+
+const schema = z.object({
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  HOST: z.string().default("127.0.0.1"),
+  PORT: z.coerce.number().int().positive().default(3100),
+  TRADING_CAPITAL_INR: z.coerce.number().nonnegative().default(0),
+  MAX_CAPITAL_INR: z.coerce.number().positive().default(100000),
+  RISK_PER_TRADE_PERCENT: z.coerce.number().positive().max(1).default(0.5),
+  MAX_DAILY_LOSS_PERCENT: z.coerce.number().positive().max(5).default(1.5),
+  MAX_TRADES_PER_DAY: z.coerce.number().int().min(1).max(2).default(2),
+  MIN_SIGNAL_SCORE: z.coerce.number().min(0).max(100).default(85),
+  TRADING_MODE: z.enum(["PAPER", "LIVE"]).default("PAPER"),
+  LIVE_ORDER_PLACEMENT_ENABLED: z.string().default("false"),
+  KITE_STATIC_IP_CONFIRMED: z.string().default("false"),
+  TELEGRAM_BOT_TOKEN: z.string().optional(),
+  TELEGRAM_CHAT_ID: z.string().optional(),
+  TELEGRAM_ENABLED: z.enum(["true", "false"]).default("false"),
+  APP_LOCAL_ACCESS_TOKEN: z.string().min(16).default("change-this-to-a-long-random-value"),
+});
+
+export const env = schema.parse(process.env);
+export const isLiveOrderEnabled = env.TRADING_MODE === "LIVE" && env.LIVE_ORDER_PLACEMENT_ENABLED === "true" && env.KITE_STATIC_IP_CONFIRMED === "true";
+export const capitalConfigured = env.TRADING_CAPITAL_INR > 0 && env.TRADING_CAPITAL_INR < env.MAX_CAPITAL_INR;
