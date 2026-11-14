@@ -9,6 +9,7 @@ import { fetchHistoricalCandles, fetchQuotes, requestAccessToken, type KiteCrede
 import { buildFuturesIndicators, buildHourlyIndicators, buildSpotIndicators15m } from "./snapshotBuilder.js";
 import { completedCandles, isMarketOpen, isWithinEntryWindow, istDateKey } from "./marketClock.js";
 import { evaluatePrecision15 } from "../strategy/precisionStrategy.js";
+import { altEntryAction } from "../strategy/altStrategies.js";
 import { chooseLiquidOption } from "../options/optionSelector.js";
 import { calculateAffordableLots, DEFAULT_RISK_CONFIG, hasHitDailyLossLimit } from "../risk/riskManager.js";
 import { DailySignalLimiter } from "./dailySignalLimiter.js";
@@ -305,6 +306,61 @@ export class SignalEngine {
       spotIndicators15m, spotIndicators1h, futuresIndicators15m,
       marketOpen: isMarketOpen(now, this.timeZone),
     };
+
+    if (env.STRATEGY_MODE !== "precision15") {
+      const byDay = new Map<string, Candle[]>();
+      for (const c of spot15m) {
+        const k = istDateKey(new Date(Date.parse(c.timestamp) + 15 * 60_000), this.timeZone);
+        const arr = byDay.get(k) ?? [];
+        arr.push(c);
+        byDay.set(k, arr);
+      }
+      const dayKeys = [...byDay.keys()].sort();
+      const todayCandles = byDay.get(dayKeys.at(-1) ?? "") ?? [];
+      const prevDayClose = dayKeys.length > 1 ? byDay.get(dayKeys.at(-2)!)!.at(-1)!.close : todayCandles[0]?.open ?? 0;
+      const altAction = snapshot.marketOpen
+        ? altEntryAction(env.STRATEGY_MODE, todayCandles, prevDayClose, futuresIndicators15m.vwap)
+        : null;
+      const candleTs = spotIndicators15m.candleTimestamp;
+      status.decision = altAction
+        ? { action: altAction, regime: "UNCLEAR", score: 0, reasons: [`STRATEGY_MODE=${env.STRATEGY_MODE} — underlying-level entry, no option contract`], rejectedReasons: [] }
+        : { action: "HOLD", regime: "UNCLEAR", score: 0, reasons: [], rejectedReasons: ["No alternative-strategy trigger on the latest completed candle"] };
+      status.candleTimestamp = candleTs;
+      status.dataAsOf = spotIndicators15m.dataAsOf;
+      if (!altAction) return;
+      const altDateKey = istDateKey(now, this.timeZone);
+      if (!this.limiter.canEmit(altDateKey, symbol, candleTs)) {
+        status.suppressedReason = "Daily signal cap reached, duplicate candle, or an open recommendation exists.";
+        return;
+      }
+      if (!isWithinEntryWindow(now, this.timeZone)) {
+        status.suppressedReason = "Signal qualified but is outside the 09:45–14:30 IST entry window.";
+        return;
+      }
+      const optionType = optionTypeFor(altAction);
+      const option = await this.selectOption(symbol, optionType, spotIndicators15m.lastClose, now, futuresMaster);
+      if (!option) {
+        status.suppressedReason = "No liquid option contract passed spread/volume/OI/quote-age checks.";
+        return;
+      }
+      const decision: SignalDecision = {
+        action: altAction, regime: "UNCLEAR", score: 0,
+        reasons: [`STRATEGY_MODE=${env.STRATEGY_MODE} — ${env.STRATEGY_MODE === "vwap" ? "VWAP reclaim" : "gap-fade"} entry`],
+        rejectedReasons: [],
+      };
+      const signal = this.buildSignal(symbol, decision, option, spotIndicators15m, futuresInstrument, now);
+      if (!signal) {
+        status.suppressedReason = "Risk budget check failed for the selected option.";
+        return;
+      }
+      this.store.add(signal);
+      this.limiter.record(signal, altDateKey);
+      this.limiter.markPositionOpen(symbol);
+      status.suppressedReason = null;
+      void this.notify(signal);
+      return;
+    }
+
     const decision = evaluatePrecision15(snapshot, {
       minSignalScore: env.MIN_SIGNAL_SCORE,
       minAdx: DEFAULTS.minAdx,
@@ -317,11 +373,6 @@ export class SignalEngine {
     if (decision.action === "HOLD") return;
 
     const dateKey = istDateKey(now, this.timeZone);
-    const capitalConfigured = env.TRADING_CAPITAL_INR > 0 && env.TRADING_CAPITAL_INR < env.MAX_CAPITAL_INR;
-    if (!capitalConfigured) {
-      status.suppressedReason = `Set TRADING_CAPITAL_INR to your actual capital (above ₹0 and below ₹${env.MAX_CAPITAL_INR.toLocaleString("en-IN")}); actionable recommendations are disabled until then.`;
-      return;
-    }
     const dailyPnl = this.store.dailyRealizedPnl(now, this.timeZone);
     if (hasHitDailyLossLimit(env.TRADING_CAPITAL_INR, dailyPnl, env.MAX_DAILY_LOSS_PERCENT)) {
       status.suppressedReason = `Daily loss limit reached. Realized P&L recorded today: ₹${dailyPnl.toFixed(2)}.`;
@@ -492,7 +543,20 @@ export class SignalEngine {
   }
 
   private async notify(signal: TradingSignal): Promise<void> {
-    if (!this.telegram?.isConfigured || !signal.option) return;
+    if (!this.telegram?.isConfigured) return;
+    if (!signal.option) {
+      const lines = [
+        `TradePulse ${signal.action} — ${signal.symbol} [${env.STRATEGY_MODE}]`,
+        `Underlying entry ~${signal.entryLimitPrice} | stop ${signal.underlyingStopLevel ?? "—"} | target ${signal.underlyingTargetLevel ?? "—"}`,
+        `Candle ${signal.candleTimestamp} | valid ~30min — execute manually. Dashboard: http://127.0.0.1:${env.PORT}`,
+      ];
+      try {
+        await this.telegram.send(lines.join("\n"));
+      } catch {
+        // notification failure must not affect signal state
+      }
+      return;
+    }
     const o = signal.option;
     const skipped = signal.status === "SKIPPED_RISK_BUDGET";
     const lines = [

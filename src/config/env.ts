@@ -12,6 +12,7 @@ const schema = z.object({
   MAX_TRADES_PER_DAY: z.coerce.number().int().min(1).max(2).default(2),
   MIN_SIGNAL_SCORE: z.coerce.number().min(0).max(100).default(85),
   TRADING_MODE: z.enum(["PAPER", "LIVE"]).default("PAPER"),
+  STRATEGY_MODE: z.enum(["precision15", "vwap", "gapfade"]).default("vwap"),
   LIVE_ORDER_PLACEMENT_ENABLED: z.string().default("false"),
   KITE_STATIC_IP_CONFIRMED: z.string().default("false"),
   LIVE_ORDER_CONFIRMATION_PHRASE: z.string().optional(),
