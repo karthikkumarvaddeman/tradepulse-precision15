@@ -36,7 +36,7 @@
   <header>
     <div>
       <h1>TradePulse Precision 15</h1>
-      <div class="sub">NIFTY + SENSEX · 15-minute confluence signals · you execute orders manually</div>
+      <div class="sub">NIFTY + SENSEX · completed 15-minute signals · manual execution only</div>
     </div>
     <div>
       <span id="modePill" class="pill warn">CONNECTING…</span>
@@ -45,8 +45,9 @@
   </header>
 
   <div class="notice">
-    <strong>Signal assistant only.</strong> This app never places orders. Scores are rule-confluence, not win probability.
-    Verify contract, spread and risk yourself before trading. Premium stop/target are approximations (delta ~0.5, no verified Greeks).
+    <strong>Signal assistant only — no approval-to-order workflow is available in this build.</strong>
+    The app never places broker orders. Scores are rule-confluence, not win probability. Verify contract, spread and risk yourself.
+    Premium stop/target are delta-proxy estimates, not broker-protected stops or guaranteed outcomes.
   </div>
 
   <div id="symbolGrid" class="grid"></div>
@@ -84,7 +85,9 @@ function renderSymbol(symbol, st) {
   }
   if (latest) {
     const o = latest.option;
-    html += `<div class="row"><span>Active signal</span><strong class="${actionClass(latest.action)}">${esc(latest.action)} · ${esc(latest.status)}</strong></div>`;
+    const recommendationExpired = latest.status === "CANDIDATE" && latest.approvalExpiresAt && Date.parse(latest.approvalExpiresAt) < Date.now();
+    html += `<div class="row"><span>Latest recommendation</span><strong class="${actionClass(latest.action)}">${esc(latest.action)} · ${recommendationExpired ? "EXPIRED — REVIEW" : esc(latest.status)}</strong></div>`;
+    if (recommendationExpired) html += `<div class="row"><span>Validity</span><strong class="warn">Expired. Do not enter based on this signal.</strong></div>`;
     if (o) {
       html += `<div class="row"><span>Contract</span><strong class="mono">${esc(o.exchange)}:${esc(o.tradingsymbol)} ${o.strike}${o.optionType} exp ${esc(o.expiry)}</strong></div>`;
       html += `<div class="row"><span>Bid / Ask / LTP</span><strong>${o.bid} / ${o.ask} / ${o.ltp}</strong></div>`;
@@ -94,16 +97,37 @@ function renderSymbol(symbol, st) {
     }
     html += `<div class="row"><span>Candle / expires</span><strong class="mono">${fmt(latest.candleTimestamp)} / ${fmt(latest.approvalExpiresAt)}</strong></div>`;
     if (latest.status === "CANDIDATE") {
-      html += `<div style="margin-top:8px"><button onclick="closeSignal('${latest.id}')">Mark as closed (I traded it)</button></div>`;
+      html += `<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+        <button onclick="closeSignal('${latest.id}')">Close traded signal and record P&amp;L</button>
+        <button onclick="dismissSignal('${latest.id}')">Dismiss — not traded</button>
+      </div>`;
     }
   }
   return `<div class="card"><h2>${symbol}</h2><div class="status ${decision ? actionClass(decision.action) : "hold"}">${decision ? esc(decision.action) : "WAITING"}</div>${html}</div>`;
 }
 
 async function closeSignal(id) {
+  const pnlText = prompt("Enter the realized net P&L in INR (after brokerage, taxes and charges). Use a negative number for a loss:", "0");
+  if (pnlText === null || pnlText.trim() === "") return;
+  const realizedPnlInr = Number(pnlText);
+  if (!Number.isFinite(realizedPnlInr)) { alert("Please enter a valid number in INR."); return; }
   const token = prompt("Enter APP_LOCAL_ACCESS_TOKEN from .env:");
   if (!token) return;
-  const res = await fetch(`/api/signals/${id}/close`, { method: "POST", headers: { "x-app-token": token } });
+  const res = await fetch(`/api/signals/${id}/close`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-app-token": token },
+    body: JSON.stringify({ realizedPnlInr })
+  });
+  const data = await res.json();
+  alert(res.ok ? data.message : data.error);
+  refresh();
+}
+
+async function dismissSignal(id) {
+  if (!confirm("Confirm this recommendation was NOT traded and should be dismissed?")) return;
+  const token = prompt("Enter APP_LOCAL_ACCESS_TOKEN from .env:");
+  if (!token) return;
+  const res = await fetch(`/api/signals/${id}/dismiss`, { method: "POST", headers: { "x-app-token": token } });
   const data = await res.json();
   alert(res.ok ? data.message : data.error);
   refresh();
@@ -139,7 +163,16 @@ async function refresh() {
     const { signals } = await signalsRes.json();
     $("modePill").textContent = st.kiteConfigured ? "LIVE DATA · SIGNALS ONLY" : "KITE NOT CONFIGURED";
     $("modePill").className = "pill " + (st.kiteConfigured ? "ok" : "warn");
-    $("clock").textContent = `Market ${st.marketOpen ? "OPEN" : "CLOSED"} · Entry window ${st.entryWindowOpen ? "OPEN" : "CLOSED"}`;
+    const pnl = Number(st.dailyRealizedPnlInr ?? 0);
+    const pnlText = `${pnl < 0 ? "−" : "+"}₹${Math.abs(pnl).toFixed(2)} realized today`;
+    $("clock").textContent = `Market ${st.marketOpen ? "OPEN" : "CLOSED"} · Entry ${st.entryWindowOpen ? "OPEN" : "CLOSED"} · ${pnlText}`;
+    if (!st.capitalConfigured) {
+      $("modePill").textContent = "CAPITAL NOT CONFIGURED · NO SIGNALS";
+      $("modePill").className = "pill warn";
+    } else if (st.dailyLossLimitHit) {
+      $("modePill").textContent = "DAILY LOSS LIMIT HIT";
+      $("modePill").className = "pill warn";
+    }
     $("symbolGrid").innerHTML = ["NIFTY", "SENSEX"].map((sym) => renderSymbol(sym, st)).join("");
     $("history").innerHTML = renderHistory(signals);
   } catch (e) {

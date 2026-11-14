@@ -19,28 +19,55 @@ const SEGMENT_INDEX: Record<IndexSymbol, { exchange: string; match: (i: Instrume
   SENSEX: { exchange: "BSE", match: (i) => i.tradingsymbol === "SENSEX" || (i.name === "SENSEX" && !i.expiry && !i.strike) },
 };
 
+function parseCsvRow(line: string): string[] {
+  const fields: string[] = [];
+  let field = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const character = line[i]!;
+    if (character === '"') {
+      if (quoted && line[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (character === "," && !quoted) {
+      fields.push(field);
+      field = "";
+    } else {
+      field += character;
+    }
+  }
+  fields.push(field);
+  return fields;
+}
+
 export function parseInstrumentCsv(csv: string, exchange: string): Instrument[] {
-  const lines = csv.trim().split(/\r?\n/);
-  const header = lines[0]!.split(",");
+  const lines = csv.replace(/^\uFEFF/, "").trim().split(/\r?\n/);
+  if (lines.length < 2) return [];
+  const header = parseCsvRow(lines[0]!);
   const col = (row: string[], name: string) => {
     const idx = header.indexOf(name);
-    const raw = idx >= 0 ? row[idx] ?? "" : "";
-    return raw.replace(/^"|"$/g, "");
+    return idx >= 0 ? row[idx] ?? "" : "";
   };
   const instruments: Instrument[] = [];
   for (const line of lines.slice(1)) {
     if (!line.trim()) continue;
-    const row = line.split(",");
+    const row = parseCsvRow(line);
     const token = Number(col(row, "instrument_token"));
-    if (!Number.isFinite(token) || token <= 0) continue;
+    if (!Number.isSafeInteger(token) || token <= 0) continue;
+    const tickSize = Number(col(row, "tick_size"));
+    const lotSize = Number(col(row, "lot_size"));
+    const strike = Number(col(row, "strike"));
     instruments.push({
       instrumentToken: token,
       tradingsymbol: col(row, "tradingsymbol"),
       name: col(row, "name"),
       expiry: col(row, "expiry"),
-      strike: Number(col(row, "strike")) || 0,
-      tickSize: Number(col(row, "tick_size")) || 0.05,
-      lotSize: Number(col(row, "lot_size")) || 0,
+      strike: Number.isFinite(strike) ? strike : 0,
+      tickSize: Number.isFinite(tickSize) && tickSize > 0 ? tickSize : 0,
+      lotSize: Number.isSafeInteger(lotSize) && lotSize >= 0 ? lotSize : 0,
       instrumentType: col(row, "instrument_type"),
       segment: col(row, "segment"),
       exchange,
@@ -84,6 +111,24 @@ export function nearestExpiry(instruments: Instrument[], name: string, exchange:
   return expiries[0]!;
 }
 
+/** Nearest currently listed option expiry; weekly options need not match futures expiry. */
+export function nearestOptionExpiry(
+  instruments: Instrument[],
+  symbol: IndexSymbol,
+  optionType: OptionType,
+  now = new Date(),
+): string {
+  const today = istDateKey(now);
+  const expiries = [...new Set(
+    instruments
+      .filter((i) => i.exchange === (symbol === "NIFTY" ? "NFO" : "BFO") && i.name === symbol &&
+        i.instrumentType === optionType && i.expiry >= today && i.strike > 0 && i.lotSize > 0)
+      .map((i) => i.expiry),
+  )].sort();
+  if (!expiries.length) throw new Error(`No ${symbol} ${optionType} option expiry found in the current instrument master.`);
+  return expiries[0]!;
+}
+
 export function resolveFuturesInstrument(instruments: Instrument[], symbol: IndexSymbol, now = new Date()): Instrument {
   const exchange = symbol === "NIFTY" ? "NFO" : "BFO";
   const expiry = nearestExpiry(instruments, symbol, exchange, now);
@@ -100,9 +145,10 @@ export function listOptionContracts(
   optionType: OptionType,
   spotPrice: number,
   maxStrikeDistancePct = 0.02,
+  now = new Date(),
 ): Instrument[] {
   const exchange = symbol === "NIFTY" ? "NFO" : "BFO";
-  const expiry = nearestExpiry(instruments, symbol, exchange);
+  const expiry = nearestOptionExpiry(instruments, symbol, optionType, now);
   const band = spotPrice * maxStrikeDistancePct;
   return instruments
     .filter((i) =>

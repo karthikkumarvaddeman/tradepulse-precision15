@@ -25,6 +25,7 @@ describe("indicators", () => {
     expect(ema(up, 20)).toBeGreaterThan(50);
     expect(rsi(up, 14)).toBe(100);
     expect(rsi(down, 14)).toBe(0);
+    expect(rsi(Array.from({ length: 20 }, () => 5), 14)).toBe(50);
     expect(rsi(up.slice(0, 10), 14)).toBeNull();
   });
 
@@ -87,5 +88,6 @@ describe("indicators", () => {
     expect(isChronologicalAndComplete(candles)).toBe(true);
     expect(isChronologicalAndComplete([{ ...candles[0]!, complete: false }])).toBe(false);
     expect(isChronologicalAndComplete([candles[1]!, candles[0]!])).toBe(false);
+    expect(isChronologicalAndComplete([{ ...candles[0]!, high: 1 }])).toBe(false);
   });
 });

@@ -75,7 +75,7 @@ function evaluateAt(symbol: "NIFTY" | "SENSEX", spot15w: Candle[], spot1hw: Cand
       spotIndicators15m: i15, spotIndicators1h: i1h, futuresIndicators15m: iF,
       marketOpen: isMarketOpen(evalTime, TZ),
     };
-    return { decision: evaluatePrecision15(snapshot, { minSignalScore: env.MIN_SIGNAL_SCORE ?? DEFAULTS.minSignalScore, minAdx: DEFAULTS.minAdx, minRelativeVolume: DEFAULTS.minRelativeVolume }), i15, iF };
+    return { decision: evaluatePrecision15(snapshot, { minSignalScore: env.MIN_SIGNAL_SCORE ?? DEFAULTS.minSignalScore, minAdx: DEFAULTS.minAdx, minRelativeVolume: DEFAULTS.minRelativeVolume }, evalTime), i15, iF };
   } finally {
     Date.now = realNow;
   }

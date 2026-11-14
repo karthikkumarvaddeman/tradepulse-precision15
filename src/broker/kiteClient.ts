@@ -85,9 +85,13 @@ function fmtKiteDateTime(date: Date, timeZone: string): string {
   return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
 }
 
-/** Kite returns "+0530" offsets; normalize to "+05:30" so Date.parse works everywhere. */
-function normalizeKiteTimestamp(ts: string): string {
-  return ts.replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
+/** Kite timestamps may be local IST text or include a compact +0530 offset. */
+export function normalizeKiteTimestamp(ts: string): string {
+  const trimmed = ts.trim().replace(" ", "T").replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
+  const withZone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(trimmed) ? trimmed : `${trimmed}+05:30`;
+  const millis = Date.parse(withZone);
+  if (!Number.isFinite(millis)) throw new Error(`Invalid Kite timestamp: ${ts}`);
+  return new Date(millis).toISOString();
 }
 
 /** Fetch historical candles. `interval` is a Kite interval such as "15minute" or "60minute". */
@@ -112,7 +116,7 @@ export async function fetchHistoricalCandles(
 
 export interface KiteQuote {
   instrument_token: number;
-  timestamp: string;
+  timestamp?: string;
   last_trade_time?: string;
   last_price: number;
   volume: number;
@@ -132,7 +136,15 @@ export async function fetchQuotes(credentials: KiteCredentials, keys: string[]):
   if (!keys.length) return {};
   const query = keys.map((key) => `i=${encodeURIComponent(key)}`).join("&");
   const payload = await kiteFetch<{ data: Record<string, KiteQuote> }>(credentials, "GET", `/quote?${query}`);
-  return payload.data;
+  const normalized: Record<string, KiteQuote> = {};
+  for (const [key, quote] of Object.entries(payload.data)) {
+    normalized[key] = {
+      ...quote,
+      timestamp: quote.timestamp ? normalizeKiteTimestamp(quote.timestamp) : undefined,
+      last_trade_time: quote.last_trade_time ? normalizeKiteTimestamp(quote.last_trade_time) : undefined,
+    };
+  }
+  return normalized;
 }
 
 /** Generate the login URL the user must open daily to obtain a request_token. */

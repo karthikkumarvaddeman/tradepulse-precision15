@@ -1,22 +1,34 @@
 import type { IndexSymbol, TradingSignal } from "../domain/types.js";
 
-/** In-memory starter only. Devin must replace with persistent, session-aware storage. */
+/** In-memory guard; SignalStore is the durable source restored on startup. */
 export class DailySignalLimiter {
   private readonly emittedByDate = new Map<string, Set<string>>();
+  private readonly seenByDate = new Map<string, Set<string>>();
   private readonly openSymbols = new Set<IndexSymbol>();
 
   constructor(private readonly maxSignalsPerDay = 2, private readonly maxOpenPositions = 1) {}
 
   canEmit(dateKey: string, symbol: IndexSymbol, candleTimestamp: string): boolean {
-    const ids = this.emittedByDate.get(dateKey) ?? new Set<string>();
     const key = `${symbol}:${candleTimestamp}`;
-    return ids.size < this.maxSignalsPerDay && !ids.has(key) && this.openSymbols.size < this.maxOpenPositions;
+    const seen = this.seenByDate.get(dateKey) ?? new Set<string>();
+    const emitted = this.emittedByDate.get(dateKey) ?? new Set<string>();
+    return !seen.has(key) && emitted.size < this.maxSignalsPerDay && this.openSymbols.size < this.maxOpenPositions;
   }
 
-  record(signal: TradingSignal, dateKey: string): void {
-    const ids = this.emittedByDate.get(dateKey) ?? new Set<string>();
-    ids.add(`${signal.symbol}:${signal.candleTimestamp}`);
-    this.emittedByDate.set(dateKey, ids);
+  /**
+   * Mark an evaluation as seen to suppress repeat notifications for the same
+   * candle. Risk-budget skips do not consume the actionable daily quota.
+   */
+  record(signal: TradingSignal, dateKey: string, countTowardsDailyCap = true): void {
+    const key = `${signal.symbol}:${signal.candleTimestamp}`;
+    const seen = this.seenByDate.get(dateKey) ?? new Set<string>();
+    seen.add(key);
+    this.seenByDate.set(dateKey, seen);
+    if (countTowardsDailyCap) {
+      const emitted = this.emittedByDate.get(dateKey) ?? new Set<string>();
+      emitted.add(key);
+      this.emittedByDate.set(dateKey, emitted);
+    }
   }
 
   markPositionOpen(symbol: IndexSymbol): void { this.openSymbols.add(symbol); }

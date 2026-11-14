@@ -29,14 +29,21 @@ export interface RiskResult {
 }
 
 export function calculateAffordableLots(input: RiskInput, config: RiskConfig = DEFAULT_RISK_CONFIG): RiskResult {
-  const allowedRiskInr = input.capitalInr * (config.riskPerTradePercent / 100);
-  if (!(input.capitalInr > 0 && input.capitalInr < config.maxCapitalInr)) {
+  const allowedRiskInr = Number.isFinite(input.capitalInr) && input.capitalInr > 0
+    ? input.capitalInr * (config.riskPerTradePercent / 100)
+    : 0;
+  if (!(Number.isFinite(input.capitalInr) && input.capitalInr > 0 && input.capitalInr < config.maxCapitalInr)) {
     return { allowedRiskInr: 0, riskPerLotInr: 0, affordableLots: 0, affordable: false, reason: `Set actual capital above ₹0 and below ₹${config.maxCapitalInr.toLocaleString("en-IN")}` };
   }
-  if (!(input.premiumEntry > 0 && input.premiumStop >= 0 && input.premiumStop < input.premiumEntry && input.lotSize > 0)) {
-    return { allowedRiskInr, riskPerLotInr: 0, affordableLots: 0, affordable: false, reason: "Invalid premium, stop or lot size" };
+  const costs = input.estimatedCostsPerLot ?? 0;
+  const slippage = input.slippageBufferPerLot ?? 0;
+  if (!(Number.isFinite(input.premiumEntry) && Number.isFinite(input.premiumStop) && Number.isFinite(input.lotSize) &&
+    input.premiumEntry > 0 && input.premiumStop >= 0 && input.premiumStop < input.premiumEntry &&
+    Number.isInteger(input.lotSize) && input.lotSize > 0 && Number.isFinite(costs) && costs >= 0 &&
+    Number.isFinite(slippage) && slippage >= 0 && config.riskPerTradePercent > 0 && config.riskPerTradePercent <= 1)) {
+    return { allowedRiskInr, riskPerLotInr: 0, affordableLots: 0, affordable: false, reason: "Invalid premium, stop, lot size, costs or risk configuration" };
   }
-  const riskPerLotInr = (input.premiumEntry - input.premiumStop) * input.lotSize + (input.estimatedCostsPerLot ?? 0) + (input.slippageBufferPerLot ?? 0);
+  const riskPerLotInr = (input.premiumEntry - input.premiumStop) * input.lotSize + costs + slippage;
   const affordableLots = riskPerLotInr > 0 ? Math.floor(allowedRiskInr / riskPerLotInr) : 0;
   return {
     allowedRiskInr,
@@ -48,5 +55,6 @@ export function calculateAffordableLots(input: RiskInput, config: RiskConfig = D
 }
 
 export function hasHitDailyLossLimit(capitalInr: number, dailyPnlInr: number, dailyLossLimitPercent: number = DEFAULTS.dailyLossLimitPercent): boolean {
-  return capitalInr <= 0 || dailyPnlInr <= -(capitalInr * (dailyLossLimitPercent / 100));
+  if (!Number.isFinite(capitalInr) || !Number.isFinite(dailyPnlInr) || !Number.isFinite(dailyLossLimitPercent)) return true;
+  return capitalInr <= 0 || dailyLossLimitPercent <= 0 || dailyPnlInr <= -(capitalInr * (dailyLossLimitPercent / 100));
 }

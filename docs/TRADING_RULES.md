@@ -21,7 +21,7 @@
 12. No daily cap, open-position, market-hours, duplicate-signal, or daily-loss restriction is breached.
 
 ## Score (100 points)
-Score only after all hard gates are met. Score is confluence, not win probability.
+The engine reports a diagnostic confluence score for strategy gates even when a specific hard gate fails; a high diagnostic score never overrides a failed gate. A directional action is returned only when all directional gates pass and the score meets the configured threshold. Score is confluence, not win probability.
 - 1-hour trend alignment: 15
 - 15-minute EMA structure: 15
 - futures VWAP alignment: 15
@@ -44,12 +44,12 @@ Minimum actionable score: 85/100. Max two actionable signals per day across NIFT
 ## Risk rules
 - User must set exact `TRADING_CAPITAL_INR` below ₹100,000; zero or unset disables actionable recommendations.
 - Risk per trade = 0.5% of configured capital, inclusive of estimated charges and slippage buffer.
-- Daily stop = 1.5% of configured capital. Count realized P&L plus conservative open-position loss; block new entries after the limit.
+- Daily stop = 1.5% of configured capital. This build sums realized P&L manually entered when a traded recommendation is closed and blocks further recommendations after the configured limit. It does not ingest broker P&L or unrealized open-position loss; the operator must monitor those separately. Do not treat this manual ledger as a complete broker-side risk control.
 - At most two entries per day across both indices combined; at most one open position.
 - If one lot's risk exceeds allowance, skip the trade. Do not reduce stop distance merely to make a lot affordable.
 - Initial underlying invalidation reference can use 1.5x ATR(14), but translate to option premium risk through tested scenarios; an underlying ATR stop is not the same as a guaranteed premium stop.
 - Target planning minimum 1.5R. Do not imply a target is guaranteed.
-- Default no-new-entry window: before 09:45 and after 14:30 IST. Use exchange calendar and holiday data.
+- Default no-new-entry window: before 09:45 and after 14:30 IST. The current clock helper excludes weekends but does not load an official exchange holiday calendar; verify holidays and special sessions manually.
 
 ## Mandatory HOLD / SKIP cases
 - 1-hour and 15-minute trend disagree.
@@ -62,3 +62,10 @@ Minimum actionable score: 85/100. Max two actionable signals per day across NIFT
 - No lot affordable within risk cap.
 - Position already open, daily trade cap reached, daily loss hit, or duplicate candle signal.
 - Outside allowed entry window or exchange holiday.
+
+## Implementation boundary in this build
+- Completed-candle, OHLC validity, chronology, indicator/candle close alignment, and stale/future timestamps are checked before a directional signal can pass. The hourly trend timestamp allows up to 75 minutes of age; 15-minute and futures candle snapshots allow one full 15-minute interval plus a 2-minute feed grace. Option quotes have a separate 2-minute freshness check.
+- Option quote timestamps are required; an absent timestamp is not replaced with the local clock.
+- Capital must be configured before a recommendation can be emitted. Both stop-risk budget and full long-option premium notional are checked.
+- Daily realized P&L is persisted locally only when the operator records it on closing a manually traded recommendation. Broker positions, fills, margin and intratrade drawdown are not synchronized.
+- The approval service is not wired into the dashboard, and the Kite order adapter is a disabled placeholder. This build is not live-trading capable.

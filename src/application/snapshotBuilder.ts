@@ -75,8 +75,10 @@ const MIN_SLOT_SAMPLES = 8;
 /** Average volume for the same time-of-day slot across prior sessions — fixes U-shaped intraday volume bias. */
 function slotAverageVolume(candles: Candle[], last: Candle, timeZone: string): number | null {
   const key = slotKey(last.timestamp, timeZone);
+  const currentSession = new Date(last.timestamp).toLocaleDateString("en-CA", { timeZone });
   const volumes = candles
-    .filter((c) => slotKey(c.timestamp, timeZone) === key && c.volume != null)
+    .filter((c) => new Date(c.timestamp).toLocaleDateString("en-CA", { timeZone }) !== currentSession &&
+      slotKey(c.timestamp, timeZone) === key && c.volume != null && c.volume > 0)
     .map((c) => c.volume!);
   if (volumes.length < MIN_SLOT_SAMPLES) return null;
   return volumes.reduce((a, b) => a + b, 0) / volumes.length;
@@ -87,7 +89,9 @@ export function buildFuturesIndicators(candles: Candle[], now: Date, timeZone: s
   if (!isChronologicalAndComplete(done) || done.length < 25) return null;
   const last = done[done.length - 1]!;
   const sessionCandles = done.filter((c) => sameSessionDate(c.timestamp, last.timestamp, timeZone));
-  const avgVolume = averageVolume(done, 20);
+  // Baseline excludes the current bar so an unusually large live bar cannot
+  // inflate its own reference average.
+  const avgVolume = averageVolume(done.slice(0, -1), 20);
   const sessionVwap = vwap(sessionCandles);
   if (sessionVwap == null || avgVolume == null || avgVolume <= 0 || !last.volume) return null;
   return {

@@ -7,10 +7,10 @@ import type { Candle, IndexSymbol, MarketSnapshot, OptionCandidate, OptionType, 
 import { getInstruments, listOptionContracts, resolveFuturesInstrument, resolveIndexInstrument, type Instrument } from "../broker/instrumentMaster.js";
 import { fetchHistoricalCandles, fetchQuotes, requestAccessToken, type KiteCredentials, type KiteCandle } from "../broker/kiteClient.js";
 import { buildFuturesIndicators, buildHourlyIndicators, buildSpotIndicators15m } from "./snapshotBuilder.js";
-import { isMarketOpen, isWithinEntryWindow, istDateKey } from "./marketClock.js";
+import { completedCandles, isMarketOpen, isWithinEntryWindow, istDateKey } from "./marketClock.js";
 import { evaluatePrecision15 } from "../strategy/precisionStrategy.js";
 import { chooseLiquidOption } from "../options/optionSelector.js";
-import { calculateAffordableLots, DEFAULT_RISK_CONFIG } from "../risk/riskManager.js";
+import { calculateAffordableLots, DEFAULT_RISK_CONFIG, hasHitDailyLossLimit } from "../risk/riskManager.js";
 import { DailySignalLimiter } from "./dailySignalLimiter.js";
 import { SignalStore } from "./signalStore.js";
 import { TelegramNotifier } from "../notifications/telegram.js";
@@ -45,6 +45,8 @@ export interface EngineStatus {
   marketOpen: boolean;
   entryWindowOpen: boolean;
   capitalConfigured: boolean;
+  dailyRealizedPnlInr: number;
+  dailyLossLimitHit: boolean;
   symbols: Record<IndexSymbol, SymbolStatus>;
   latestSignals: Partial<Record<IndexSymbol, TradingSignal>>;
 }
@@ -66,6 +68,7 @@ function optionTypeFor(action: "BUY_CALL" | "BUY_PUT"): OptionType {
 export class SignalEngine {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  private tickInProgress = false;
   private readonly limiter: DailySignalLimiter;
   private readonly statuses = new Map<IndexSymbol, SymbolStatus>();
   private readonly credentials: KiteCredentials;
@@ -86,7 +89,7 @@ export class SignalEngine {
     this.telegram = env.TELEGRAM_ENABLED === "true" && env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID
       ? new TelegramNotifier({ botToken: env.TELEGRAM_BOT_TOKEN, chatId: env.TELEGRAM_CHAT_ID })
       : null;
-    this.limiter = new DailySignalLimiter(DEFAULTS.maxDailySignals, env.MAX_OPEN_RECOMMENDATIONS);
+    this.limiter = new DailySignalLimiter(env.MAX_TRADES_PER_DAY, env.MAX_OPEN_RECOMMENDATIONS);
     for (const symbol of SYMBOLS) {
       this.statuses.set(symbol, { symbol, evaluatedAt: null, candleTimestamp: null, dataAsOf: null, decision: null, suppressedReason: null, error: null });
     }
@@ -95,10 +98,16 @@ export class SignalEngine {
 
   private restoreDailyState(): void {
     const today = new Date();
-    for (const signal of this.store.signalsOn(today, this.timeZone)) {
-      if (this.store.isClosed(signal.id) || signal.status !== "CANDIDATE") continue;
-      this.limiter.record(signal, istDateKey(today, this.timeZone));
-      this.limiter.markPositionOpen(signal.symbol);
+    const todayKey = istDateKey(today, this.timeZone);
+    for (const signal of this.store.all()) {
+      const signalIsToday = istDateKey(new Date(signal.createdAt), this.timeZone) === todayKey;
+      if (signalIsToday && signal.status === "SKIPPED_RISK_BUDGET") {
+        this.limiter.record(signal, todayKey, false);
+        continue;
+      }
+      if (signal.status !== "CANDIDATE") continue;
+      if (signalIsToday) this.limiter.record(signal, todayKey, true);
+      if (!this.store.isClosed(signal.id)) this.limiter.markPositionOpen(signal.symbol);
     }
   }
 
@@ -192,20 +201,24 @@ export class SignalEngine {
     const symbols = {} as Record<IndexSymbol, SymbolStatus>;
     for (const symbol of SYMBOLS) symbols[symbol] = { ...this.statuses.get(symbol)! };
     const now = new Date();
+    const capitalConfigured = env.TRADING_CAPITAL_INR > 0 && env.TRADING_CAPITAL_INR < env.MAX_CAPITAL_INR;
+    const dailyRealizedPnlInr = this.store.dailyRealizedPnl(now, this.timeZone);
     return {
       time: now.toISOString(),
       timeZone: this.timeZone,
       kiteConfigured: kiteConfigured(),
       marketOpen: isMarketOpen(now, this.timeZone),
       entryWindowOpen: isWithinEntryWindow(now, this.timeZone),
-      capitalConfigured: env.TRADING_CAPITAL_INR > 0,
+      capitalConfigured,
+      dailyRealizedPnlInr,
+      dailyLossLimitHit: capitalConfigured && hasHitDailyLossLimit(env.TRADING_CAPITAL_INR, dailyRealizedPnlInr, env.MAX_DAILY_LOSS_PERCENT),
       symbols,
       latestSignals: Object.fromEntries(this.store.latestBySymbol()),
     };
   }
 
-  closeSignal(id: string): boolean {
-    const closed = this.store.close(id);
+  closeSignal(id: string, realizedPnlInr: number): boolean {
+    const closed = this.store.close(id, realizedPnlInr);
     if (closed) {
       const signal = this.store.all().find((s) => s.id === id);
       if (signal) this.limiter.markPositionClosed(signal.symbol);
@@ -213,13 +226,34 @@ export class SignalEngine {
     return closed;
   }
 
+  dismissSignal(id: string): boolean {
+    const dismissed = this.store.dismiss(id);
+    if (dismissed) {
+      const signal = this.store.all().find((s) => s.id === id);
+      if (signal) this.limiter.markPositionClosed(signal.symbol);
+    }
+    return dismissed;
+  }
+
   async tick(): Promise<void> {
-    if (!this.running) return;
-    await Promise.all(SYMBOLS.map((symbol) => this.evaluateSymbol(symbol).catch((error) => {
-      const status = this.statuses.get(symbol)!;
-      status.error = error instanceof Error ? error.message : String(error);
-      status.evaluatedAt = new Date().toISOString();
-    })));
+    // Avoid overlapping poll cycles and process symbols sequentially. Both
+    // guards matter: option quote requests are asynchronous, so parallel
+    // NIFTY/SENSEX evaluation could otherwise pass the one-open gate twice.
+    if (!this.running || this.tickInProgress) return;
+    this.tickInProgress = true;
+    try {
+      for (const symbol of SYMBOLS) {
+        try {
+          await this.evaluateSymbol(symbol);
+        } catch (error) {
+          const status = this.statuses.get(symbol)!;
+          status.error = error instanceof Error ? error.message : String(error);
+          status.evaluatedAt = new Date().toISOString();
+        }
+      }
+    } finally {
+      this.tickInProgress = false;
+    }
   }
 
   private async evaluateSymbol(symbol: IndexSymbol): Promise<void> {
@@ -249,9 +283,11 @@ export class SignalEngine {
       fetchHistoricalCandles(this.credentials, indexInstrument.instrumentToken, "60minute", from1h, now, false, this.timeZone),
       fetchHistoricalCandles(this.credentials, futuresInstrument.instrumentToken, "15minute", from15m, now, true, this.timeZone),
     ]);
-    const spot15m = spot15Raw.map(toCandle);
-    const spot1h = spot1hRaw.map(toCandle);
-    const futures15m = futures15Raw.map(toCandle);
+    // Historical endpoints may include the still-forming candle. Exclude it
+    // before exposing the series to any strategy or trigger validation.
+    const spot15m = completedCandles(spot15Raw.map(toCandle), 15, now);
+    const spot1h = completedCandles(spot1hRaw.map(toCandle), 60, now);
+    const futures15m = completedCandles(futures15Raw.map(toCandle), 15, now);
 
     const spotIndicators15m = buildSpotIndicators15m(spot15m, now);
     const spotIndicators1h = buildHourlyIndicators(spot1h, now);
@@ -273,7 +309,7 @@ export class SignalEngine {
       minSignalScore: env.MIN_SIGNAL_SCORE,
       minAdx: DEFAULTS.minAdx,
       minRelativeVolume: DEFAULTS.minRelativeVolume,
-    });
+    }, now);
     status.decision = decision;
     status.candleTimestamp = spotIndicators15m.candleTimestamp;
     status.dataAsOf = spotIndicators15m.dataAsOf;
@@ -281,6 +317,16 @@ export class SignalEngine {
     if (decision.action === "HOLD") return;
 
     const dateKey = istDateKey(now, this.timeZone);
+    const capitalConfigured = env.TRADING_CAPITAL_INR > 0 && env.TRADING_CAPITAL_INR < env.MAX_CAPITAL_INR;
+    if (!capitalConfigured) {
+      status.suppressedReason = `Set TRADING_CAPITAL_INR to your actual capital (above ₹0 and below ₹${env.MAX_CAPITAL_INR.toLocaleString("en-IN")}); actionable recommendations are disabled until then.`;
+      return;
+    }
+    const dailyPnl = this.store.dailyRealizedPnl(now, this.timeZone);
+    if (hasHitDailyLossLimit(env.TRADING_CAPITAL_INR, dailyPnl, env.MAX_DAILY_LOSS_PERCENT)) {
+      status.suppressedReason = `Daily loss limit reached. Realized P&L recorded today: ₹${dailyPnl.toFixed(2)}.`;
+      return;
+    }
     const candleTimestamp = spotIndicators15m.candleTimestamp;
     if (!this.limiter.canEmit(dateKey, symbol, candleTimestamp)) {
       status.suppressedReason = "Daily signal cap reached, duplicate candle, or an open recommendation exists.";
@@ -299,15 +345,16 @@ export class SignalEngine {
 
     const signal = this.buildSignal(symbol, decision, option, spotIndicators15m, futuresInstrument, now);
     if (!signal) {
-      status.suppressedReason = "Risk budget check failed — one lot exceeds the per-trade risk allowance.";
-      const skipped = this.recordSkipped(symbol, decision, option, "SKIPPED_RISK_BUDGET", "One lot exceeds the per-trade risk budget.", spotIndicators15m.candleTimestamp);
+      status.suppressedReason = "Capital/risk budget check failed — one lot is not affordable within configured capital and per-trade risk allowance.";
+      const skipped = this.recordSkipped(symbol, decision, option, "SKIPPED_RISK_BUDGET", "One lot fails configured capital or per-trade risk budget.", spotIndicators15m.candleTimestamp);
+      this.limiter.record(skipped, dateKey, false);
       void this.notify(skipped);
       return;
     }
 
+    this.store.add(signal);
     this.limiter.record(signal, dateKey);
     this.limiter.markPositionOpen(symbol);
-    this.store.add(signal);
     status.suppressedReason = null;
     void this.notify(signal);
   }
@@ -320,7 +367,7 @@ export class SignalEngine {
     futuresMaster: Instrument[],
   ): Promise<OptionCandidate | null> {
     const exchange = FUTURES_EXCHANGE[symbol];
-    const contracts = listOptionContracts(futuresMaster, symbol, optionType, spotPrice);
+    const contracts = listOptionContracts(futuresMaster, symbol, optionType, spotPrice, 0.02, now);
     if (!contracts.length) return null;
     const keys = contracts.map((c) => `${exchange}:${c.tradingsymbol}`);
     const quotes = await fetchQuotes(this.credentials, keys);
@@ -329,7 +376,9 @@ export class SignalEngine {
       const quote = quotes[`${exchange}:${contract.tradingsymbol}`];
       const bid = quote?.depth?.buy?.[0]?.price;
       const ask = quote?.depth?.sell?.[0]?.price;
-      if (!quote || !bid || !ask) continue;
+      // Missing exchange timestamps must fail closed; do not disguise an
+      // un-timestamped quote as fresh by substituting the current local time.
+      if (!quote || !quote.timestamp || !bid || !ask) continue;
       candidates.push({
         exchange,
         tradingsymbol: contract.tradingsymbol,
@@ -345,7 +394,7 @@ export class SignalEngine {
         ask,
         volume: quote.volume,
         openInterest: quote.oi ?? 0,
-        quoteAsOf: quote.timestamp ?? now.toISOString(),
+        quoteAsOf: quote.timestamp,
       });
     }
     return chooseLiquidOption(candidates, {
@@ -366,14 +415,14 @@ export class SignalEngine {
     now: Date,
   ): TradingSignal | null {
     const premiumEntry = option.ask;
+    const entryLimitPrice = roundToTick(premiumEntry, option.tickSize, "up");
     const direction = decision.action === "BUY_CALL" ? 1 : -1;
     const underlyingStopDistance = env.STOP_ATR_MULTIPLE * indicators.atr14;
     const premiumStopDistance = underlyingStopDistance * env.OPTION_DELTA_APPROX;
-    const premiumStop = roundToTick(premiumEntry - premiumStopDistance, option.tickSize, "down");
-    if (!(premiumStop > 0 && premiumStop < premiumEntry)) return null;
-    const targetDistance = env.TARGET_R_MULTIPLE * (premiumEntry - premiumStop);
-    const targetPremium = roundToTick(premiumEntry + targetDistance, option.tickSize, "up");
-    const entryLimitPrice = roundToTick(premiumEntry, option.tickSize, "up");
+    const premiumStop = roundToTick(entryLimitPrice - premiumStopDistance, option.tickSize, "down");
+    if (!(entryLimitPrice > 0 && premiumStop > 0 && premiumStop < entryLimitPrice)) return null;
+    const targetDistance = env.TARGET_R_MULTIPLE * (entryLimitPrice - premiumStop);
+    const targetPremium = roundToTick(entryLimitPrice + targetDistance, option.tickSize, "up");
     const underlyingStopLevel = Number((indicators.lastClose - direction * underlyingStopDistance).toFixed(2));
     const underlyingTargetLevel = Number((indicators.lastClose + direction * env.TARGET_R_MULTIPLE * underlyingStopDistance).toFixed(2));
 
@@ -383,23 +432,22 @@ export class SignalEngine {
       riskPerTradePercent: env.RISK_PER_TRADE_PERCENT,
       dailyLossLimitPercent: env.MAX_DAILY_LOSS_PERCENT,
     };
-    const capitalConfigured = env.TRADING_CAPITAL_INR > 0 && env.TRADING_CAPITAL_INR < env.MAX_CAPITAL_INR;
-    const costsAndSlippage = ESTIMATED_COSTS_PER_LOT_INR + premiumEntry * option.lotSize * SLIPPAGE_BUFFER_PCT;
-    let affordableLots = 1;
-    let riskPerLotInr = (premiumEntry - premiumStop) * option.lotSize + costsAndSlippage;
-    if (capitalConfigured) {
-      const risk = calculateAffordableLots({
-        capitalInr: env.TRADING_CAPITAL_INR,
-        premiumEntry,
-        premiumStop,
-        lotSize: option.lotSize,
-        estimatedCostsPerLot: ESTIMATED_COSTS_PER_LOT_INR,
-        slippageBufferPerLot: premiumEntry * option.lotSize * SLIPPAGE_BUFFER_PCT,
-      }, riskConfig);
-      if (!risk.affordable) return null;
-      affordableLots = risk.affordableLots;
-      riskPerLotInr = risk.riskPerLotInr;
-    }
+    const risk = calculateAffordableLots({
+      capitalInr: env.TRADING_CAPITAL_INR,
+      premiumEntry: entryLimitPrice,
+      premiumStop,
+      lotSize: option.lotSize,
+      estimatedCostsPerLot: ESTIMATED_COSTS_PER_LOT_INR,
+      slippageBufferPerLot: entryLimitPrice * option.lotSize * SLIPPAGE_BUFFER_PCT,
+    }, riskConfig);
+    if (!risk.affordable) return null;
+    // A long option is paid for in full. Risk-budget sizing alone must not
+    // recommend a premium notional larger than the capital configured by the user.
+    const notionalPerLot = entryLimitPrice * option.lotSize + ESTIMATED_COSTS_PER_LOT_INR;
+    const lotsAffordableByCapital = Math.floor(env.TRADING_CAPITAL_INR / notionalPerLot);
+    const affordableLots = Math.min(risk.affordableLots, lotsAffordableByCapital);
+    if (affordableLots < 1) return null;
+    const riskPerLotInr = risk.riskPerLotInr;
     const quantity = affordableLots * option.lotSize;
 
     return {
@@ -409,7 +457,7 @@ export class SignalEngine {
       status: "CANDIDATE",
       regime: decision.regime,
       score: decision.score,
-      reasons: [...decision.reasons, `Futures contract: ${futuresInstrument.tradingsymbol} (expiry ${futuresInstrument.expiry})`, ...(capitalConfigured ? [] : ["Capital not set — quantity shows 1 lot as reference; size the trade yourself within your risk budget."]), "Premium stop/target are approximations (delta ~0.5, no verified Greeks) — verify manually."],
+      reasons: [...decision.reasons, `Futures contract: ${futuresInstrument.tradingsymbol} (expiry ${futuresInstrument.expiry})`, "Premium stop/target are approximations (configured delta proxy; no verified Greeks) — verify manually."],
       rejectedReasons: decision.rejectedReasons,
       candleTimestamp: indicators.candleTimestamp,
       createdAt: now.toISOString(),

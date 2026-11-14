@@ -42,6 +42,7 @@ export function rsi(values: number[], period = 14): number | null {
     avgGain = (avgGain * (period - 1) + Math.max(change, 0)) / period;
     avgLoss = (avgLoss * (period - 1) + Math.max(-change, 0)) / period;
   }
+  if (avgLoss === 0 && avgGain === 0) return 50;
   if (avgLoss === 0) return 100;
   const rs = avgGain / avgLoss;
   return 100 - 100 / (1 + rs);
@@ -49,11 +50,8 @@ export function rsi(values: number[], period = 14): number | null {
 
 export function atr(candles: Candle[], period = 14): number | null {
   if (candles.length < period + 1) return null;
-  const ranges = candles.slice(1).map((candle, index) => {
-    const previousClose = candles[index]!.close;
-    return Math.max(candle.high - candle.low, Math.abs(candle.high - previousClose), Math.abs(candle.low - previousClose));
-  });
-  return sma(ranges, period);
+  const series = wilderAtrSeries(candles, period);
+  return series[series.length - 1] ?? null;
 }
 
 function trueRange(candles: Candle[], index: number): number {
@@ -245,7 +243,15 @@ export function relativeVolume(current: number, history: number[], period = 20):
 }
 
 export function isChronologicalAndComplete(candles: Candle[]): boolean {
-  if (!candles.length || candles.some(c => !c.complete || ![c.open, c.high, c.low, c.close].every(Number.isFinite))) return false;
+  if (!candles.length) return false;
+  for (const candle of candles) {
+    const timestamp = Date.parse(candle.timestamp);
+    if (!candle.complete || !Number.isFinite(timestamp)) return false;
+    if (![candle.open, candle.high, candle.low, candle.close].every(Number.isFinite)) return false;
+    if (!(candle.high >= Math.max(candle.open, candle.close, candle.low))) return false;
+    if (!(candle.low <= Math.min(candle.open, candle.close, candle.high))) return false;
+    if (candle.volume != null && (!Number.isFinite(candle.volume) || candle.volume < 0)) return false;
+  }
   for (let i = 1; i < candles.length; i++) {
     if (Date.parse(candles[i]!.timestamp) <= Date.parse(candles[i - 1]!.timestamp)) return false;
   }

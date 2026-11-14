@@ -18,22 +18,23 @@ Kite access tokens expire daily. Two options:
 4. `npm run kite:token -- <request_token>` — exchanges it for an access token.
 5. Copy the printed `KITE_ACCESS_TOKEN=...` into `.env` and restart the app (`npm run dev`).
 
-`KITE_API_KEY`, `KITE_API_SECRET`, and `KITE_REDIRECT_URL` are set once in `.env`. The API secret stays server-side only.
+``KITE_API_KEY`, `KITE_API_SECRET`, and `KITE_REDIRECT_URL` are set once in `.env`. Register the exact callback URL `http://127.0.0.1:3100/callback` in the Kite developer console (or keep the `.env` value and server route in sync). The API secret stays server-side only.
 
 ## What the app does with Kite
 - Downloads the NSE/BSE index master and NFO/BFO derivatives master (cached ~6h).
 - Resolves the NIFTY 50 / SENSEX index token and the nearest-expiry index futures contract dynamically — no hardcoded tokens.
 - Fetches completed 15-minute and 60-minute candles for spot, and 15-minute futures candles (for session VWAP and volume confirmation).
 - Fetches option-chain quotes only when a signal qualifies, to pick a liquid contract (spread, quote age, volume, OI checks).
+- Uses REST historical-candle polling; a live WebSocket market-data stream is not implemented in this build.
 
 ## Credentials and login
 - Create a Kite Connect app and set its redirect URL to the local backend callback.
 - Keep `KITE_API_SECRET` server-side only. Do not send it to the browser, Telegram, source control, or logs.
-- Implement the documented login/request-token/access-token handshake. Access-token lifecycle and daily re-authentication must be handled explicitly.
+- The request-token/access-token exchange and daily login helper are implemented. Access tokens expire daily; repeat the login flow each trading day.
 - Store tokens only in a protected local secret store or encrypted persistence; never commit them.
 
 ## Market data
-- Use WebSocket for live ticks/quotes and REST historical candles where permitted by the subscription.
+- A future enhancement is WebSocket live ticks/quotes; this version relies on REST historical candles and quote snapshots.
 - Download and refresh the instrument master; map NIFTY options to NSE/NFO and SENSEX options to BSE/BFO using official instrument rows.
 - Resolve spot, futures, and option symbols dynamically. Verify exchange, segment, instrument token, expiry, strike, option type, lot size, tick size and tradability.
 - Use the matching index futures contract for futures VWAP and volume confirmation.

@@ -28,7 +28,7 @@ const requireLocalToken = (req: Request, res: Response, next: NextFunction) => {
 
 app.get("/api/health", (_req, res) => {
   res.json({
-    status: "STARTER_SCAFFOLD",
+    status: "SIGNAL_ASSISTANT_MARKET_DATA_ONLY",
     mode: env.TRADING_MODE,
     liveOrderPlacementEnabled: isLiveOrderEnabled,
     capitalConfigured,
@@ -48,10 +48,21 @@ app.get("/api/status", (_req, res) => {
 });
 
 app.post("/api/signals/:id/close", requireLocalToken, (req, res) => {
-  const closed = engine.closeSignal(String(req.params.id ?? ""));
+  const realizedPnlInr = req.body?.realizedPnlInr;
+  if (typeof realizedPnlInr !== "number" || !Number.isFinite(realizedPnlInr)) {
+    return res.status(400).json({ error: "Enter the realized net P&L in INR (after charges) before closing this traded signal." });
+  }
+  const closed = engine.closeSignal(String(req.params.id ?? ""), realizedPnlInr);
   return closed
-    ? res.json({ ok: true, message: "Signal marked closed. The open-recommendation slot is freed for the next signal." })
-    : res.status(404).json({ error: "Signal not found." });
+    ? res.json({ ok: true, message: `Signal closed. Recorded realized P&L: ₹${realizedPnlInr.toFixed(2)}. The open-recommendation slot is freed.` })
+    : res.status(404).json({ error: "Signal not found or already closed." });
+});
+
+app.post("/api/signals/:id/dismiss", requireLocalToken, (req, res) => {
+  const dismissed = engine.dismissSignal(String(req.params.id ?? ""));
+  return dismissed
+    ? res.json({ ok: true, message: "Recommendation dismissed as not traded. The open-recommendation slot is freed." })
+    : res.status(404).json({ error: "Active recommendation not found or already handled." });
 });
 
 app.get("/callback", (req, res) => {
@@ -70,9 +81,12 @@ ${requestToken
      async function exchange(){
        const r = await fetch('/api/kite/callback',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({request_token:${JSON.stringify(requestToken).replace(/</g, "\\u003c")}})});
        const j = await r.json();
-       document.getElementById('result').innerHTML = j.ok
-         ? '<p style="color:#20c997">Login successful ('+j.userId+'). Access token saved — you can close this page.</p>'
-         : '<p style="color:#fb7185">Failed: '+j.error+'</p>';
+       const message = document.createElement('p');
+       message.style.color = j.ok ? '#20c997' : '#fb7185';
+       message.textContent = j.ok
+         ? 'Login successful (' + String(j.userId ?? '') + '). Access token saved — you can close this page.'
+         : 'Failed: ' + String(j.error ?? 'Unknown error');
+       document.getElementById('result').replaceChildren(message);
      }
      </script>`
   : `<p class="muted">No request_token in URL. Log in via the Kite Connect URL first.</p>`}
@@ -88,9 +102,9 @@ app.post("/api/kite/callback", express.json(), async (req, res) => {
 
 app.listen(env.PORT, env.HOST, () => {
   console.log(`TradePulse Precision 15 listening at http://${env.HOST}:${env.PORT}`);
-  console.log(`Mode=${env.TRADING_MODE}; liveOrders=${isLiveOrderEnabled}; capitalConfigured=${capitalConfigured}; kiteConfigured=${kiteConfigured}`);
+  console.log(`Mode=${env.TRADING_MODE}; liveOrders=${isLiveOrderEnabled} (not implemented); capitalConfigured=${capitalConfigured}; kiteConfigured=${kiteConfigured}`);
   engine.start();
-  console.log("Signal engine started (polling completed 15-minute candles; no orders are ever placed).");
+  console.log("Signal engine started (completed-candle signals only; no broker orders are implemented or placed).");
   if (env.APP_LOCAL_ACCESS_TOKEN === "change-this-to-a-long-random-value") {
     console.warn("WARNING: APP_LOCAL_ACCESS_TOKEN is still the default value. Set a long random value in .env before real use.");
   }

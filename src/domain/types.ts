@@ -1,7 +1,7 @@
 export type IndexSymbol = "NIFTY" | "SENSEX";
 export type SignalAction = "BUY_CALL" | "BUY_PUT" | "HOLD";
 export type OptionType = "CE" | "PE";
-export type SignalStatus = "CANDIDATE" | "READY_FOR_APPROVAL" | "APPROVED" | "DECLINED" | "EXPIRED" | "SKIPPED" | "SKIPPED_RISK_BUDGET" | "ORDER_PENDING" | "ORDER_UNKNOWN" | "ORDER_REJECTED" | "FILLED";
+export type SignalStatus = "CANDIDATE" | "READY_FOR_APPROVAL" | "APPROVED" | "DECLINED" | "EXPIRED" | "CLOSED_MANUAL" | "SKIPPED" | "SKIPPED_RISK_BUDGET" | "ORDER_PENDING" | "ORDER_UNKNOWN" | "ORDER_REJECTED" | "FILLED";
 export type MarketRegime = "BULL_TREND" | "BEAR_TREND" | "SIDEWAYS" | "UNCLEAR";
 
 export interface Candle {
