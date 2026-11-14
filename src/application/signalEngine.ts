@@ -353,6 +353,18 @@ export class SignalEngine {
         status.suppressedReason = "Risk budget check failed for the selected option.";
         return;
       }
+      const dayOpen = todayCandles[0]?.open ?? 0;
+      const isGapDay = dayOpen > 0 && Math.abs((dayOpen - prevDayClose) / prevDayClose) > 0.004;
+      const useGapFillTarget = env.STRATEGY_MODE === "gapfade" || (env.STRATEGY_MODE === "combo" && isGapDay);
+      if (useGapFillTarget) {
+        // Gap-fill exit: target is previous day's close, mapped to premium via delta approx
+        const dir = altAction === "BUY_CALL" ? 1 : -1;
+        signal.underlyingTargetLevel = Number(prevDayClose.toFixed(2));
+        signal.targetPremium = roundToTick(
+          (signal.entryLimitPrice ?? option.ask) + env.OPTION_DELTA_APPROX * dir * (prevDayClose - spotIndicators15m.lastClose),
+          option.tickSize, "up");
+        signal.reasons.push("Exit target = previous day's close (gap fill); premium target estimated via delta ~0.5");
+      }
       this.store.add(signal);
       this.limiter.record(signal, altDateKey);
       this.limiter.markPositionOpen(symbol);

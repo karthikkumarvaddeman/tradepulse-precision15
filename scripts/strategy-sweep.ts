@@ -58,15 +58,35 @@ function vwapReclaim(dayCandles: Candle[], evalIdx: number, futVwap: number): Ac
   return null;
 }
 
-function gapFade(dayCandles: Candle[], prevDayClose: number, evalIdx: number): Action {
+function gapFade(dayCandles: Candle[], prevDayClose: number, evalIdx: number, minGap = 0.004): Action {
   if (dayCandles.length < 3 || evalIdx < 2) return null;
   const open = dayCandles[0]!.open;
   const gapPct = (open - prevDayClose) / prevDayClose;
   const cur = dayCandles[evalIdx]!.close;
   const prev = dayCandles[evalIdx - 1]!.close;
-  if (gapPct > 0.004 && prev >= open && cur < open) return "BUY_PUT";   // gap up fading below open
-  if (gapPct < -0.004 && prev <= open && cur > open) return "BUY_CALL"; // gap down reclaiming open
+  // only fade while price is still on the gap side of prev close (target still ahead)
+  if (gapPct > minGap && prev >= open && cur < open && cur > prevDayClose) return "BUY_PUT";
+  if (gapPct < -minGap && prev <= open && cur > open && cur < prevDayClose) return "BUY_CALL";
   return null;
+}
+
+// outcome with explicit target price (gap-fill) instead of R-multiple
+function simulateOutcomePx(dayCandles: Candle[], evalIdx: number, action: "BUY_CALL" | "BUY_PUT", entry: number, atr14: number, targetPx: number) {
+  const dir = action === "BUY_CALL" ? 1 : -1;
+  const stopDist = env.STOP_ATR_MULTIPLE * atr14;
+  const stop = entry - dir * stopDist;
+  let mfe = 0;
+  for (let i = evalIdx + 1; i < dayCandles.length; i++) {
+    const c = dayCandles[i]!;
+    const fav = dir === 1 ? c.high - entry : entry - c.low;
+    if (fav > mfe) mfe = fav;
+    const hitStop = dir === 1 ? c.low <= stop : c.high >= stop;
+    const hitTarget = dir === 1 ? c.high >= targetPx : c.low <= targetPx;
+    if (hitStop) return { result: "LOSS" as const, pnl: dir * (stop - entry), mfe };
+    if (hitTarget) return { result: "WIN" as const, pnl: dir * (targetPx - entry), mfe };
+  }
+  const exit = dayCandles.at(-1)!.close;
+  return { result: "EOD" as const, pnl: dir * (exit - entry), mfe };
 }
 
 function simulateOutcome(dayCandles: Candle[], evalIdx: number, action: "BUY_CALL" | "BUY_PUT", entry: number, atr14: number) {
@@ -89,12 +109,18 @@ function simulateOutcome(dayCandles: Candle[], evalIdx: number, action: "BUY_CAL
 
 interface DayData { symbol: string; date: string; candles: Candle[]; atr14: number; futVwap: number; prevDayClose: number; trends: ("bull" | "bear" | null)[]; relVols: number[] }
 
-const STRATEGIES: [string, (d: DayData, evalIdx: number) => Action][] = [
+// [name, entryFn, exitMode] — exitMode "atr" = 1.5R target, "prevclose" = gap-fill target
+type Strat = [string, (d: DayData, i: number) => Action, ("atr" | "prevclose" | "comboauto")?];
+const STRATEGIES: Strat[] = [
   ["VWAP-reclaim", (d, i) => vwapReclaim(d.candles, i, d.futVwap)],
   ["VWAP+1h-trend", (d, i) => { const a = vwapReclaim(d.candles, i, d.futVwap); return a && d.trends[i] === (a === "BUY_CALL" ? "bull" : "bear") ? a : null; }],
   ["VWAP+vol>=1.2", (d, i) => { const a = vwapReclaim(d.candles, i, d.futVwap); return a && d.relVols[i]! >= 1.2 ? a : null; }],
   ["VWAP+early(<13:00)", (d, i) => { const end = candleEnd(d.candles[i]!); const early = end.toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }) <= "13:00"; const a = vwapReclaim(d.candles, i, d.futVwap); return early ? a : null; }],
   ["VWAP+trend+vol", (d, i) => { const a = vwapReclaim(d.candles, i, d.futVwap); return a && d.trends[i] === (a === "BUY_CALL" ? "bull" : "bear") && d.relVols[i]! >= 1.2 ? a : null; }],
+  ["GapFade-0.4%-fill", (d, i) => gapFade(d.candles, d.prevDayClose, i, 0.004), "prevclose"],
+  ["GapFade-0.6%-fill", (d, i) => gapFade(d.candles, d.prevDayClose, i, 0.006), "prevclose"],
+  ["GapFade-0.8%-fill", (d, i) => gapFade(d.candles, d.prevDayClose, i, 0.008), "prevclose"],
+  ["Combo-gap+vwap", (d, i) => gapFade(d.candles, d.prevDayClose, i, 0.004) ?? vwapReclaim(d.candles, i, d.futVwap), "comboauto"],
 ];
 
 const days: DayData[] = [];
@@ -157,7 +183,7 @@ for (const symbol of ["NIFTY", "SENSEX"] as const) {
 }
 console.log(`Trading days loaded: ${days.length}`);
 
-for (const [name, fn] of STRATEGIES) {
+for (const [name, fn, exitMode] of STRATEGIES) {
   let w = 0, l = 0, e = 0, pts = 0, signals = 0, mfes = 0;
   const dailyCounts = new Map<string, number>();
   const openDays = new Set<string>();
@@ -175,7 +201,12 @@ for (const [name, fn] of STRATEGIES) {
       if (dailyCounts.get(d.date)! >= DEFAULTS.maxDailySignals) break;
       dailyCounts.set(d.date, (dailyCounts.get(d.date) ?? 0) + 1);
       const entry = d.candles[i]!.close;
-      const out = simulateOutcome(d.candles, i, action, entry, d.atr14);
+      const em = exitMode === "comboauto"
+        ? (gapFade(d.candles, d.prevDayClose, i, 0.004) ? "prevclose" : "atr")
+        : exitMode;
+      const out = em === "prevclose"
+        ? simulateOutcomePx(d.candles, i, action, entry, d.atr14, d.prevDayClose)
+        : simulateOutcome(d.candles, i, action, entry, d.atr14);
       signals++; mfes += out.mfe;
       if (out.result === "WIN") w++; else if (out.result === "LOSS") l++; else e++;
       pts += out.pnl;
