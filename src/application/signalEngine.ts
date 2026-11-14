@@ -563,7 +563,9 @@ export class SignalEngine {
       skipped
         ? `⚠️ TradePulse ${signal.action} SKIPPED — ${signal.symbol} (risk budget)`
         : `TradePulse ${signal.action} — ${signal.symbol}`,
-      `Score ${signal.score}/100 (confluence, not a probability) | Regime: ${signal.regime}`,
+      signal.score > 0
+        ? `Score ${signal.score}/100 (confluence, not a probability) | Regime: ${signal.regime}`
+        : `Rule-based trigger (${env.STRATEGY_MODE}) — no confluence score | Regime: ${signal.regime}`,
       `Contract: ${o.exchange}:${o.tradingsymbol} strike ${o.strike} exp ${o.expiry}`,
       `Bid ${o.bid} / Ask ${o.ask} / LTP ${o.ltp} | Qty ${signal.quantity ?? "-"}`,
       `Entry limit ~${signal.entryLimitPrice} | Premium stop ~${signal.stopLossPremium} | Target ~${signal.targetPremium}`,
