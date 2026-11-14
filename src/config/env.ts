@@ -14,6 +14,16 @@ const schema = z.object({
   TRADING_MODE: z.enum(["PAPER", "LIVE"]).default("PAPER"),
   LIVE_ORDER_PLACEMENT_ENABLED: z.string().default("false"),
   KITE_STATIC_IP_CONFIRMED: z.string().default("false"),
+  LIVE_ORDER_CONFIRMATION_PHRASE: z.string().optional(),
+  KITE_API_KEY: z.string().optional(),
+  KITE_API_SECRET: z.string().optional(),
+  KITE_ACCESS_TOKEN: z.string().optional(),
+  KITE_REDIRECT_URL: z.string().optional(),
+  APP_TIMEZONE: z.string().default("Asia/Kolkata"),
+  MAX_OPEN_RECOMMENDATIONS: z.coerce.number().int().min(1).max(2).default(1),
+  STOP_ATR_MULTIPLE: z.coerce.number().positive().default(1.5),
+  TARGET_R_MULTIPLE: z.coerce.number().positive().default(1.5),
+  OPTION_DELTA_APPROX: z.coerce.number().min(0.05).max(1).default(0.5),
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
   TELEGRAM_ENABLED: z.enum(["true", "false"]).default("false"),
@@ -23,3 +33,5 @@ const schema = z.object({
 export const env = schema.parse(process.env);
 export const isLiveOrderEnabled = env.TRADING_MODE === "LIVE" && env.LIVE_ORDER_PLACEMENT_ENABLED === "true" && env.KITE_STATIC_IP_CONFIRMED === "true";
 export const capitalConfigured = env.TRADING_CAPITAL_INR > 0 && env.TRADING_CAPITAL_INR < env.MAX_CAPITAL_INR;
+export const kiteConfigured = () => Boolean(env.KITE_API_KEY && env.KITE_ACCESS_TOKEN);
+export const kiteSecretConfigured = () => Boolean(env.KITE_API_KEY && env.KITE_API_SECRET);

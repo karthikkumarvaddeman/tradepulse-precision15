@@ -1,7 +1,7 @@
 export type IndexSymbol = "NIFTY" | "SENSEX";
 export type SignalAction = "BUY_CALL" | "BUY_PUT" | "HOLD";
 export type OptionType = "CE" | "PE";
-export type SignalStatus = "CANDIDATE" | "READY_FOR_APPROVAL" | "APPROVED" | "DECLINED" | "EXPIRED" | "SKIPPED" | "ORDER_PENDING" | "ORDER_UNKNOWN" | "ORDER_REJECTED" | "FILLED";
+export type SignalStatus = "CANDIDATE" | "READY_FOR_APPROVAL" | "APPROVED" | "DECLINED" | "EXPIRED" | "SKIPPED" | "SKIPPED_RISK_BUDGET" | "ORDER_PENDING" | "ORDER_UNKNOWN" | "ORDER_REJECTED" | "FILLED";
 export type MarketRegime = "BULL_TREND" | "BEAR_TREND" | "SIDEWAYS" | "UNCLEAR";
 
 export interface Candle {
@@ -31,6 +31,7 @@ export interface IndicatorSnapshot {
   vwap: number;
   futuresVolume: number;
   futuresVolumeSma20: number;
+  futuresVolumeSlotAvg?: number;
   previousCandleHigh: number;
   previousCandleLow: number;
   lastClose: number;
@@ -45,7 +46,7 @@ export interface MarketSnapshot {
   futures15m: Candle[];
   spotIndicators15m: IndicatorSnapshot;
   spotIndicators1h: Pick<IndicatorSnapshot, "ema20" | "ema50" | "ema200" | "lastClose" | "candleTimestamp" | "dataAsOf">;
-  futuresIndicators15m: Pick<IndicatorSnapshot, "vwap" | "futuresVolume" | "futuresVolumeSma20" | "dataAsOf">;
+  futuresIndicators15m: Pick<IndicatorSnapshot, "vwap" | "futuresVolume" | "futuresVolumeSma20" | "futuresVolumeSlotAvg" | "dataAsOf">;
   marketOpen: boolean;
 }
 
@@ -84,6 +85,8 @@ export interface TradingSignal {
   entryLimitPrice?: number;
   stopLossPremium?: number;
   targetPremium?: number;
+  underlyingStopLevel?: number;
+  underlyingTargetLevel?: number;
   maxRiskInr?: number;
   approvalExpiresAt?: string;
 }

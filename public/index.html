@@ -3,45 +3,153 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>TradePulse Precision 15</title>
+  <title>TradePulse Precision 15 — Signals</title>
   <style>
-    :root { color-scheme: dark; --bg:#0b1220; --panel:#121e31; --border:#26364e; --muted:#94a3b8; --text:#e5edf8; --green:#20c997; --red:#fb7185; --amber:#fbbf24; }
-    * { box-sizing:border-box; } body { margin:0; font:15px/1.5 Segoe UI,Arial,sans-serif; background:var(--bg); color:var(--text); }
-    main { max-width:1100px; margin:auto; padding:28px 18px 60px; } header { display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
-    h1 { margin:0; font-size:26px; } .sub,.muted { color:var(--muted); } .pill { border:1px solid var(--border); border-radius:999px; padding:5px 11px; font-size:12px; }
-    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; margin-top:22px; }
-    .card { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:18px; }
-    .status { font-size:20px; font-weight:700; margin:8px 0; } .warning { color:var(--amber); } .ok { color:var(--green); }
-    .row { display:flex; justify-content:space-between; gap:14px; padding:8px 0; border-bottom:1px solid var(--border); } .row:last-child { border:0; }
-    code { color:#c4b5fd; } a { color:#93c5fd; } .notice { margin-top:18px; border-left:3px solid var(--amber); padding:12px 14px; background:#241e13; border-radius:6px; }
-    button { border:0; padding:10px 14px; border-radius:8px; background:#334155; color:white; font-weight:600; }
+    :root { color-scheme: dark; --bg:#0b1220; --panel:#121e31; --border:#26364e; --muted:#94a3b8; --text:#e5edf8; --green:#20c997; --red:#fb7185; --amber:#fbbf24; --blue:#60a5fa; }
+    * { box-sizing:border-box; } body { margin:0; font:14px/1.5 Segoe UI,Arial,sans-serif; background:var(--bg); color:var(--text); }
+    main { max-width:1200px; margin:auto; padding:24px 18px 60px; }
+    header { display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
+    h1 { margin:0; font-size:24px; } h2 { font-size:17px; margin:0 0 10px; }
+    .sub,.muted { color:var(--muted); } .pill { border:1px solid var(--border); border-radius:999px; padding:4px 10px; font-size:12px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:14px; margin-top:18px; }
+    .card { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:16px; }
+    .status { font-size:20px; font-weight:700; margin:6px 0; }
+    .buy-call { color:var(--green); } .buy-put { color:var(--red); } .hold { color:var(--muted); }
+    .row { display:flex; justify-content:space-between; gap:12px; padding:6px 0; border-bottom:1px solid var(--border); font-size:13px; }
+    .row:last-child { border:0; } .row span:first-child { color:var(--muted); }
+    ul.reasons { margin:8px 0 0; padding-left:18px; color:var(--muted); font-size:12.5px; }
+    ul.reasons li { margin:2px 0; }
+    .notice { margin-top:16px; border-left:3px solid var(--amber); padding:12px 14px; background:#241e13; border-radius:6px; font-size:13px; }
+    .sig { border:1px solid var(--border); border-radius:10px; padding:12px; margin-top:10px; background:#0f1930; }
+    .sig .head { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; }
+    .badge { font-size:11px; font-weight:700; padding:2px 8px; border-radius:6px; border:1px solid var(--border); }
+    .badge.CANDIDATE { color:var(--green); border-color:var(--green); }
+    .badge.SKIPPED { color:var(--amber); border-color:var(--amber); }
+    button { border:0; padding:7px 12px; border-radius:8px; background:#334155; color:white; font-weight:600; font-size:12px; cursor:pointer; }
+    button:hover { background:#475569; }
+    .mono { font-family:Consolas,monospace; font-size:12px; }
+    .warn { color:var(--amber); } .ok { color:var(--green); } .bad { color:var(--red); }
   </style>
 </head>
 <body>
 <main>
   <header>
-    <div><h1>TradePulse Precision 15</h1><div class="sub">NIFTY + SENSEX · 15-minute signals · human approval</div></div>
-    <span class="pill warning">PAPER / SETUP MODE</span>
+    <div>
+      <h1>TradePulse Precision 15</h1>
+      <div class="sub">NIFTY + SENSEX · 15-minute confluence signals · you execute orders manually</div>
+    </div>
+    <div>
+      <span id="modePill" class="pill warn">CONNECTING…</span>
+      <span id="clock" class="pill muted" style="margin-left:8px"></span>
+    </div>
   </header>
-  <div class="grid">
-    <section class="card"><div class="muted">NIFTY</div><div class="status">WAITING FOR DATA</div><div class="muted">No live recommendation is available until the Kite market-data adapter is implemented.</div></section>
-    <section class="card"><div class="muted">SENSEX</div><div class="status">WAITING FOR DATA</div><div class="muted">No live recommendation is available until the Kite market-data adapter is implemented.</div></section>
+
+  <div class="notice">
+    <strong>Signal assistant only.</strong> This app never places orders. Scores are rule-confluence, not win probability.
+    Verify contract, spread and risk yourself before trading. Premium stop/target are approximations (delta ~0.5, no verified Greeks).
   </div>
+
+  <div id="symbolGrid" class="grid"></div>
+
   <section class="card" style="margin-top:14px">
-    <h2 style="margin-top:0">System readiness</h2>
-    <div id="health">Checking local service…</div>
-    <div class="row"><span>Strategy</span><strong>Precision 15 · score threshold 85</strong></div>
-    <div class="row"><span>Daily limit</span><strong>Maximum 2 signals across both indices</strong></div>
-    <div class="row"><span>Risk</span><strong>0.5% per trade · 1.5% daily loss</strong></div>
-    <div class="row"><span>Execution</span><strong>Human approval required · live orders disabled</strong></div>
+    <h2>Signal history</h2>
+    <div id="history" class="muted">Loading…</div>
   </section>
-  <div class="notice"><strong>Not live-connected:</strong> this is a clean starter project for Devin to complete. It does not fetch live data, generate actionable live signals, or place orders. Do not use it for live trading in its current state.</div>
-  <p class="muted">Telegram alerts are configured in the backend after Devin completes the notifier wiring. Telegram messages are informational only; approval belongs in this local dashboard.</p>
 </main>
+
 <script>
-fetch('/api/health').then(r=>r.json()).then(h=>{
-  document.getElementById('health').innerHTML = `<div class="row"><span>Application</span><strong>${h.status}</strong></div><div class="row"><span>Mode</span><strong>${h.mode}</strong></div><div class="row"><span>Capital configured</span><strong>${h.capitalConfigured ? 'Yes' : 'No — set TRADING_CAPITAL_INR'}</strong></div><div class="row"><span>Live market data</span><strong>${h.liveMarketDataConfigured ? 'Connected' : 'Not configured'}</strong></div><div class="row"><span>Live order placement</span><strong>${h.liveOrderPlacementEnabled ? 'Enabled' : 'Disabled'}</strong></div>`;
-}).catch(()=>{ document.getElementById('health').textContent='Backend unavailable. Start with npm run dev.'; });
+const $ = (id) => document.getElementById(id);
+const fmt = (iso) => iso ? new Date(iso).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: true }) : "—";
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function actionClass(action) {
+  return action === "BUY_CALL" ? "buy-call" : action === "BUY_PUT" ? "buy-put" : "hold";
+}
+
+function renderSymbol(symbol, st) {
+  const s = st.symbols?.[symbol];
+  const decision = s?.decision;
+  const latest = st.latestSignals?.[symbol];
+  let html = `<div class="row"><span>Evaluated</span><strong>${fmt(s?.evaluatedAt)}</strong></div>`;
+  html += `<div class="row"><span>Data as of</span><strong class="mono">${fmt(s?.dataAsOf)}</strong></div>`;
+  if (s?.error) html += `<div class="row"><span>Error</span><strong class="bad">${esc(s.error)}</strong></div>`;
+  if (s?.suppressedReason) html += `<div class="row"><span>Suppressed</span><strong class="warn">${esc(s.suppressedReason)}</strong></div>`;
+  if (decision) {
+    html += `<div class="row"><span>Latest decision</span><strong class="${actionClass(decision.action)}">${esc(decision.action)} · score ${decision.score}/100</strong></div>`;
+    if (decision.rejectedReasons?.length) {
+      html += `<ul class="reasons">${decision.rejectedReasons.slice(0, 6).map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`;
+    }
+  } else {
+    html += `<div class="row"><span>Latest decision</span><strong class="muted">No completed evaluation yet</strong></div>`;
+  }
+  if (latest) {
+    const o = latest.option;
+    html += `<div class="row"><span>Active signal</span><strong class="${actionClass(latest.action)}">${esc(latest.action)} · ${esc(latest.status)}</strong></div>`;
+    if (o) {
+      html += `<div class="row"><span>Contract</span><strong class="mono">${esc(o.exchange)}:${esc(o.tradingsymbol)} ${o.strike}${o.optionType} exp ${esc(o.expiry)}</strong></div>`;
+      html += `<div class="row"><span>Bid / Ask / LTP</span><strong>${o.bid} / ${o.ask} / ${o.ltp}</strong></div>`;
+      html += `<div class="row"><span>Qty / Entry / Stop / Target</span><strong>${latest.quantity ?? "-"} · ${latest.entryLimitPrice ?? "-"} · ${latest.stopLossPremium ?? "-"} · ${latest.targetPremium ?? "-"}</strong></div>`;
+      if (latest.underlyingStopLevel) html += `<div class="row"><span>Underlying stop / target</span><strong>${latest.underlyingStopLevel} / ${latest.underlyingTargetLevel}</strong></div>`;
+      html += `<div class="row"><span>Est. risk</span><strong>₹${Math.round(latest.maxRiskInr ?? 0)}</strong></div>`;
+    }
+    html += `<div class="row"><span>Candle / expires</span><strong class="mono">${fmt(latest.candleTimestamp)} / ${fmt(latest.approvalExpiresAt)}</strong></div>`;
+    if (latest.status === "CANDIDATE") {
+      html += `<div style="margin-top:8px"><button onclick="closeSignal('${latest.id}')">Mark as closed (I traded it)</button></div>`;
+    }
+  }
+  return `<div class="card"><h2>${symbol}</h2><div class="status ${decision ? actionClass(decision.action) : "hold"}">${decision ? esc(decision.action) : "WAITING"}</div>${html}</div>`;
+}
+
+async function closeSignal(id) {
+  const token = prompt("Enter APP_LOCAL_ACCESS_TOKEN from .env:");
+  if (!token) return;
+  const res = await fetch(`/api/signals/${id}/close`, { method: "POST", headers: { "x-app-token": token } });
+  const data = await res.json();
+  alert(res.ok ? data.message : data.error);
+  refresh();
+}
+
+function renderHistory(signals) {
+  const actionable = signals.filter((s) => s.action !== "HOLD").slice(-10).reverse();
+  if (!actionable.length) return `<div class="muted">No signals yet. Signals appear after a completed 15-minute candle meets all gates.</div>`;
+  return actionable.map((s) => {
+    const o = s.option;
+    return `<div class="sig">
+      <div class="head">
+        <strong class="${actionClass(s.action)}">${esc(s.action)}</strong>
+        <span class="badge ${esc(s.status)}">${esc(s.status)}</span>
+        <span class="muted">${fmt(s.createdAt)} IST</span>
+      </div>
+      <div class="row"><span>Symbol</span><strong>${esc(s.symbol)} · score ${s.score}/100 · ${esc(s.regime)}</strong></div>
+      ${o ? `<div class="row"><span>Contract</span><strong class="mono">${esc(o.exchange)}:${esc(o.tradingsymbol)} ${o.strike}${o.optionType}</strong></div>` : ""}
+      ${o ? `<div class="row"><span>Bid/Ask/LTP</span><strong>${o.bid} / ${o.ask} / ${o.ltp} · vol ${o.volume} · OI ${o.openInterest}</strong></div>` : ""}
+      ${s.entryLimitPrice ? `<div class="row"><span>Qty / Entry / Stop / Target</span><strong>${s.quantity} · ${s.entryLimitPrice} · ${s.stopLossPremium} · ${s.targetPremium}</strong></div>` : ""}
+      ${s.underlyingStopLevel ? `<div class="row"><span>Underlying stop / target</span><strong>${s.underlyingStopLevel} / ${s.underlyingTargetLevel}</strong></div>` : ""}
+      ${s.maxRiskInr ? `<div class="row"><span>Est. risk</span><strong>₹${Math.round(s.maxRiskInr)}</strong></div>` : ""}
+      ${s.rejectedReasons?.length ? `<ul class="reasons">${s.rejectedReasons.slice(0,4).map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
+      <ul class="reasons">${(s.reasons ?? []).slice(0,4).map((r) => `<li>${esc(r)}</li>`).join("")}</ul>
+    </div>`;
+  }).join("");
+}
+
+async function refresh() {
+  try {
+    const [statusRes, signalsRes] = await Promise.all([fetch("/api/status"), fetch("/api/signals")]);
+    const st = await statusRes.json();
+    const { signals } = await signalsRes.json();
+    $("modePill").textContent = st.kiteConfigured ? "LIVE DATA · SIGNALS ONLY" : "KITE NOT CONFIGURED";
+    $("modePill").className = "pill " + (st.kiteConfigured ? "ok" : "warn");
+    $("clock").textContent = `Market ${st.marketOpen ? "OPEN" : "CLOSED"} · Entry window ${st.entryWindowOpen ? "OPEN" : "CLOSED"}`;
+    $("symbolGrid").innerHTML = ["NIFTY", "SENSEX"].map((sym) => renderSymbol(sym, st)).join("");
+    $("history").innerHTML = renderHistory(signals);
+  } catch (e) {
+    $("modePill").textContent = "BACKEND UNAVAILABLE";
+    $("modePill").className = "pill bad";
+  }
+}
+
+refresh();
+setInterval(refresh, 30_000);
 </script>
 </body>
 </html>

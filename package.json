@@ -15,7 +15,9 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "telegram:setup": "tsx scripts/telegram-setup.ts",
-    "telegram:test": "tsx scripts/telegram-test.ts"
+    "telegram:test": "tsx scripts/telegram-test.ts",
+    "kite:login": "tsx scripts/kite-auth.ts",
+    "kite:token": "tsx scripts/kite-auth.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

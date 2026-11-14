@@ -15,7 +15,7 @@
 6. ADX(14) >= 22 and +DI > -DI for calls; ADX >= 22 and -DI > +DI for puts.
 7. MACD(12,26,9) histogram is positive and rising for calls; negative and falling for puts. Require two completed histogram values for slope comparison.
 8. RSI(14) is 55–68 for calls or 32–45 for puts. Treat out-of-range as a rejection, not a counter-signal.
-9. Matching futures volume is at least 1.2x its 20-completed-candle average. Missing futures volume means no trade.
+9. Matching futures volume is at least 1.2x the average for the same time-of-day slot across prior sessions (falls back to the 20-candle SMA only when slot history is insufficient). Missing futures volume means no trade.
 10. A completed 15-minute price-action trigger exists: pullback continuation with close through prior candle high/low, or a breakout/breakdown and retest of a precomputed level. Avoid chasing an extended candle.
 11. Option quote is current, spread passes configured limit, contract is valid for the exchange/expiry, and lot is affordable within risk budget.
 12. No daily cap, open-position, market-hours, duplicate-signal, or daily-loss restriction is breached.

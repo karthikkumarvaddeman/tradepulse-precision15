@@ -7,17 +7,7 @@ export interface StrategyLimits {
   minRelativeVolume: number;
 }
 
-const WEIGHTS = {
-  hourlyTrend: 15,
-  emaStructure: 15,
-  vwap: 15,
-  supertrend: 10,
-  adxDi: 10,
-  macd: 10,
-  rsi: 5,
-  volume: 10,
-  priceAction: 10,
-} as const;
+type Gate = readonly [passed: boolean, weight: number, reason: string];
 
 export function evaluatePrecision15(
   snapshot: MarketSnapshot,
@@ -45,33 +35,35 @@ export function evaluatePrecision15(
   const fifteenBear = m.ema20 < m.ema50 && m.lastClose < m.ema200;
   const callRsi = m.rsi14 >= 55 && m.rsi14 <= 68;
   const putRsi = m.rsi14 >= 32 && m.rsi14 <= 45;
-  const relativeVol = f.futuresVolumeSma20 > 0 ? f.futuresVolume / f.futuresVolumeSma20 : 0;
+  const volumeBaseline = f.futuresVolumeSlotAvg ?? f.futuresVolumeSma20;
+  const relativeVol = volumeBaseline > 0 ? f.futuresVolume / volumeBaseline : 0;
 
-  const callGates = [
-    [hourlyBull, "1-hour bullish trend not confirmed"],
-    [fifteenBull, "15-minute bullish EMA structure not confirmed"],
-    [m.lastClose > f.vwap, "Price is not above futures session VWAP"],
-    [m.supertrendDirection === "BULLISH", "Supertrend is not bullish"],
-    [m.adx14 >= limits.minAdx && m.plusDi14 > m.minusDi14, "ADX/+DI bullish confirmation failed"],
-    [m.macdHistogram > 0 && m.macdHistogram > m.previousMacdHistogram, "MACD histogram is not positive and rising"],
-    [callRsi, "RSI is outside the call-entry range (55–68)"],
-    [relativeVol >= limits.minRelativeVolume, "Futures relative volume is below threshold"],
-    [m.lastClose > m.previousCandleHigh, "No completed-candle bullish price-action trigger"],
-  ] as const;
-  const putGates = [
-    [hourlyBear, "1-hour bearish trend not confirmed"],
-    [fifteenBear, "15-minute bearish EMA structure not confirmed"],
-    [m.lastClose < f.vwap, "Price is not below futures session VWAP"],
-    [m.supertrendDirection === "BEARISH", "Supertrend is not bearish"],
-    [m.adx14 >= limits.minAdx && m.minusDi14 > m.plusDi14, "ADX/-DI bearish confirmation failed"],
-    [m.macdHistogram < 0 && m.macdHistogram < m.previousMacdHistogram, "MACD histogram is not negative and falling"],
-    [putRsi, "RSI is outside the put-entry range (32–45)"],
-    [relativeVol >= limits.minRelativeVolume, "Futures relative volume is below threshold"],
-    [m.lastClose < m.previousCandleLow, "No completed-candle bearish price-action trigger"],
-  ] as const;
+  const callGates: Gate[] = [
+    [hourlyBull, 15, "1-hour bullish trend not confirmed"],
+    [fifteenBull, 15, "15-minute bullish EMA structure not confirmed"],
+    [m.lastClose > f.vwap, 15, "Price is not above futures session VWAP"],
+    [m.supertrendDirection === "BULLISH", 10, "Supertrend is not bullish"],
+    [m.adx14 >= limits.minAdx && m.plusDi14 > m.minusDi14, 10, "ADX/+DI bullish confirmation failed"],
+    [m.macdHistogram > 0 && m.macdHistogram > m.previousMacdHistogram, 10, "MACD histogram is not positive and rising"],
+    [callRsi, 5, "RSI is outside the call-entry range (55–68)"],
+    [relativeVol >= limits.minRelativeVolume, 10, "Futures relative volume is below threshold"],
+    [m.lastClose > m.previousCandleHigh, 10, "No completed-candle bullish price-action trigger"],
+  ];
+  const putGates: Gate[] = [
+    [hourlyBear, 15, "1-hour bearish trend not confirmed"],
+    [fifteenBear, 15, "15-minute bearish EMA structure not confirmed"],
+    [m.lastClose < f.vwap, 15, "Price is not below futures session VWAP"],
+    [m.supertrendDirection === "BEARISH", 10, "Supertrend is not bearish"],
+    [m.adx14 >= limits.minAdx && m.minusDi14 > m.plusDi14, 10, "ADX/-DI bearish confirmation failed"],
+    [m.macdHistogram < 0 && m.macdHistogram < m.previousMacdHistogram, 10, "MACD histogram is not negative and falling"],
+    [putRsi, 5, "RSI is outside the put-entry range (32–45)"],
+    [relativeVol >= limits.minRelativeVolume, 10, "Futures relative volume is below threshold"],
+    [m.lastClose < m.previousCandleLow, 10, "No completed-candle bearish price-action trigger"],
+  ];
 
-  const scoreCall = callGates.reduce((total, [ok], index) => total + (ok ? Object.values(WEIGHTS)[index]! : 0), 0);
-  const scorePut = putGates.reduce((total, [ok], index) => total + (ok ? Object.values(WEIGHTS)[index]! : 0), 0);
+  const scoreOf = (gates: Gate[]) => gates.reduce((total, [ok, weight]) => total + (ok ? weight : 0), 0);
+  const scoreCall = scoreOf(callGates);
+  const scorePut = scoreOf(putGates);
   const allGlobalRejected = rejected.length > 0;
 
   if (allGlobalRejected) return { action: "HOLD", regime: "UNCLEAR", score: 0, reasons, rejectedReasons: rejected };
@@ -86,7 +78,7 @@ export function evaluatePrecision15(
   }
 
   const chosen = scoreCall >= scorePut ? callGates : putGates;
-  rejected.push(...chosen.filter(([ok]) => !ok).map(([, reason]) => reason));
+  rejected.push(...chosen.filter(([ok]) => !ok).map(([, , reason]) => reason));
   return { action: "HOLD", regime: hourlyBull ? "BULL_TREND" : hourlyBear ? "BEAR_TREND" : "UNCLEAR", score: Math.max(scoreCall, scorePut), reasons, rejectedReasons: [...new Set(rejected)] };
 }
 

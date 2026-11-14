@@ -1,6 +1,30 @@
-# Kite Connect implementation checklist
+# Kite Connect setup
 
-This is an implementation checklist, not legal or broker advice. Verify current Zerodha, NSE, BSE and SEBI requirements before live use.
+This app uses Kite Connect for **market data only**. It never places orders — you execute manually.
+
+## Daily login (required every trading day)
+Kite access tokens expire daily. Two options:
+
+**Via Telegram (easiest when away from the PC):**
+1. Open `npm run kite:login` output URL on any device and log in.
+2. After Zerodha redirects, copy the `request_token` value from the redirect URL.
+3. Send that token as a message to your Telegram bot — the app exchanges it, saves `KITE_ACCESS_TOKEN` to `.env`, and confirms on Telegram. Only messages from your configured `TELEGRAM_CHAT_ID` are accepted.
+4. Send `/status` to the bot anytime for a signal/data summary.
+
+**Via terminal:**
+1. `npm run kite:login` — prints a Zerodha login URL.
+2. Open the URL, log in, and approve the app.
+3. Zerodha redirects to `KITE_REDIRECT_URL` with a `request_token` query parameter.
+4. `npm run kite:token -- <request_token>` — exchanges it for an access token.
+5. Copy the printed `KITE_ACCESS_TOKEN=...` into `.env` and restart the app (`npm run dev`).
+
+`KITE_API_KEY`, `KITE_API_SECRET`, and `KITE_REDIRECT_URL` are set once in `.env`. The API secret stays server-side only.
+
+## What the app does with Kite
+- Downloads the NSE/BSE index master and NFO/BFO derivatives master (cached ~6h).
+- Resolves the NIFTY 50 / SENSEX index token and the nearest-expiry index futures contract dynamically — no hardcoded tokens.
+- Fetches completed 15-minute and 60-minute candles for spot, and 15-minute futures candles (for session VWAP and volume confirmation).
+- Fetches option-chain quotes only when a signal qualifies, to pick a liquid contract (spread, quote age, volume, OI checks).
 
 ## Credentials and login
 - Create a Kite Connect app and set its redirect URL to the local backend callback.

@@ -45,4 +45,30 @@ export class TelegramNotifier {
       throw new Error(`Telegram notification failed: ${payload.description ?? `HTTP ${response.status}`}`);
     }
   }
+
+  async getUpdates(offset?: number, timeoutSeconds = 0): Promise<TelegramUpdate[]> {
+    if (!this.config.botToken) {
+      throw new Error("Telegram is not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.");
+    }
+    const params = new URLSearchParams({ timeout: String(timeoutSeconds) });
+    if (offset != null) params.set("offset", String(offset));
+    const response = await fetch(`https://api.telegram.org/bot${this.config.botToken}/getUpdates?${params}`, {
+      signal: AbortSignal.timeout(35_000),
+    });
+    const payload = await response.json() as TelegramApiResponse<TelegramUpdate[]>;
+    if (!response.ok || !payload.ok) {
+      throw new Error(`Telegram getUpdates failed: ${payload.description ?? `HTTP ${response.status}`}`);
+    }
+    return payload.result ?? [];
+  }
+}
+
+export interface TelegramUpdate {
+  update_id: number;
+  message?: {
+    message_id: number;
+    text?: string;
+    chat: { id: number | string };
+    date: number;
+  };
 }
