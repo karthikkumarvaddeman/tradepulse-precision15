@@ -1,0 +1,16 @@
+export const DEFAULTS = {
+  indices: ["NIFTY", "SENSEX"] as const,
+  entryTimeframeMinutes: 15,
+  trendTimeframeMinutes: 60,
+  minSignalScore: 85,
+  maxDailySignals: 2,
+  maxOpenPositions: 1,
+  riskPerTradePercent: 0.5,
+  dailyLossLimitPercent: 1.5,
+  maxSpreadPercent: 1.0,
+  minRelativeVolume: 1.2,
+  minAdx: 22,
+  entryWindowStart: "09:45",
+  entryWindowEnd: "14:30",
+  approvalTtlSeconds: 30,
+} as const;
