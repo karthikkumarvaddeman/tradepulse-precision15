@@ -15,6 +15,7 @@ const toCandle = (k: KiteCandle): Candle => ({ timestamp: k.timestamp, open: k.o
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const dayKey = (t: Date) => t.toLocaleDateString("en-CA", { timeZone: TZ });
 const candleEnd = (c: Candle) => new Date(Date.parse(c.timestamp) + 15 * 60_000);
+const candleEnd60 = (c: Candle) => Date.parse(c.timestamp) + 60 * 60_000;
 
 async function fetchChunk(token: number, interval: string, from: Date, to: Date, oi: boolean): Promise<KiteCandle[]> {
   for (let a = 0; a < 6; a++) {
@@ -86,12 +87,14 @@ function simulateOutcome(dayCandles: Candle[], evalIdx: number, action: "BUY_CAL
   return { result: "EOD" as const, pnl: dir * (exit - entry), mfe };
 }
 
-interface DayData { symbol: string; date: string; candles: Candle[]; atr14: number; futVwap: number; relVol: number; prevDayClose: number }
+interface DayData { symbol: string; date: string; candles: Candle[]; atr14: number; futVwap: number; prevDayClose: number; trends: ("bull" | "bear" | null)[]; relVols: number[] }
 
 const STRATEGIES: [string, (d: DayData, evalIdx: number) => Action][] = [
-  ["ORB-15min", (d, i) => orb(d.candles, i)],
   ["VWAP-reclaim", (d, i) => vwapReclaim(d.candles, i, d.futVwap)],
-  ["Gap-fade-0.4%", (d, i) => gapFade(d.candles, d.prevDayClose, i)],
+  ["VWAP+1h-trend", (d, i) => { const a = vwapReclaim(d.candles, i, d.futVwap); return a && d.trends[i] === (a === "BUY_CALL" ? "bull" : "bear") ? a : null; }],
+  ["VWAP+vol>=1.2", (d, i) => { const a = vwapReclaim(d.candles, i, d.futVwap); return a && d.relVols[i]! >= 1.2 ? a : null; }],
+  ["VWAP+early(<13:00)", (d, i) => { const end = candleEnd(d.candles[i]!); const early = end.toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }) <= "13:00"; const a = vwapReclaim(d.candles, i, d.futVwap); return early ? a : null; }],
+  ["VWAP+trend+vol", (d, i) => { const a = vwapReclaim(d.candles, i, d.futVwap); return a && d.trends[i] === (a === "BUY_CALL" ? "bull" : "bear") && d.relVols[i]! >= 1.2 ? a : null; }],
 ];
 
 const days: DayData[] = [];
@@ -136,7 +139,20 @@ for (const symbol of ["NIFTY", "SENSEX"] as const) {
       return v > 0 ? tp / v : 0;
     })();
     const prevClose = di > 0 ? byDay.get(sortedDays[di - 1]!)!.at(-1)!.close : candles[0]!.open;
-    days.push({ symbol, date, candles, atr14, futVwap, relVol: 1, prevDayClose: prevClose });
+    // per-candle: 1h trend (last completed hourly candle before this candle's end) and futures rel volume vs day-so-far avg
+    const trends: ("bull" | "bear" | null)[] = [];
+    const relVols: number[] = [];
+    let futVolSum = 0;
+    for (let i = 0; i < candles.length; i++) {
+      const end = candleEnd(candles[i]!);
+      const h1 = spot1h.filter((c) => candleEnd60(c) <= end.getTime()).at(-1);
+      trends.push(h1 ? (h1.close > h1.open ? "bull" : h1.close < h1.open ? "bear" : null) : null);
+      const fv = futByTs.get(candles[i]!.timestamp)?.volume ?? 0;
+      const avgSoFar = i > 0 ? futVolSum / i : 0;
+      relVols.push(avgSoFar > 0 ? fv / avgSoFar : 1);
+      futVolSum += fv;
+    }
+    days.push({ symbol, date, candles, atr14, futVwap, prevDayClose: prevClose, trends, relVols });
   }
 }
 console.log(`Trading days loaded: ${days.length}`);
@@ -145,6 +161,7 @@ for (const [name, fn] of STRATEGIES) {
   let w = 0, l = 0, e = 0, pts = 0, signals = 0, mfes = 0;
   const dailyCounts = new Map<string, number>();
   const openDays = new Set<string>();
+  const trades: string[] = [];
   for (const d of days) {
     const posKey = `${d.symbol}:${d.date}`;
     if (openDays.has(posKey)) continue; // one open position per symbol-day
@@ -162,10 +179,13 @@ for (const [name, fn] of STRATEGIES) {
       signals++; mfes += out.mfe;
       if (out.result === "WIN") w++; else if (out.result === "LOSS") l++; else e++;
       pts += out.pnl;
+      const hhmm = end.toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
+      trades.push(`${d.date} ${hhmm} IST ${d.symbol} ${action} @${entry.toFixed(1)} -> ${out.result} ${out.pnl >= 0 ? "+" : ""}${out.pnl.toFixed(0)}pts (MFE +${out.mfe.toFixed(0)})`);
       openDays.add(posKey); // hold rest of day after first signal (conservative)
       void sigKey;
       break;
     }
   }
-  console.log(`${name.padEnd(16)} signals=${String(signals).padStart(4)}  W=${w} L=${l} EOD=${e}  pts=${pts >= 0 ? "+" : ""}${pts.toFixed(0)}  avgMFE=+${(mfes / Math.max(1, signals)).toFixed(0)}`);
+  console.log(`\n${name.padEnd(16)} signals=${String(signals).padStart(4)}  W=${w} L=${l} EOD=${e}  pts=${pts >= 0 ? "+" : ""}${pts.toFixed(0)}  avgMFE=+${(mfes / Math.max(1, signals)).toFixed(0)}`);
+  for (const t of trades) console.log(`  ${t}`);
 }
