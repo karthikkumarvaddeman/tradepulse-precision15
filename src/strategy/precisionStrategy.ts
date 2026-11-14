@@ -8,6 +8,11 @@ export interface StrategyLimits {
   minRelativeVolume: number;
   max15mDataAgeMs?: number;
   max1hDataAgeMs?: number;
+  rsiCallRange?: readonly [number, number];
+  rsiPutRange?: readonly [number, number];
+  requireMacdSlope?: boolean;
+  requirePriceAction?: boolean;
+  requireVwap?: boolean;
 }
 
 type Gate = readonly [passed: boolean, weight: number, reason: string];
@@ -81,32 +86,44 @@ export function evaluatePrecision15(
   const hourlyBear = h.ema20 < h.ema50 && h.lastClose < h.ema200;
   const fifteenBull = m.ema20 > m.ema50 && m.lastClose > m.ema200;
   const fifteenBear = m.ema20 < m.ema50 && m.lastClose < m.ema200;
-  const callRsi = m.rsi14 >= 55 && m.rsi14 <= 68;
-  const putRsi = m.rsi14 >= 32 && m.rsi14 <= 45;
+  const callRsiRange = limits.rsiCallRange ?? [55, 68];
+  const putRsiRange = limits.rsiPutRange ?? [32, 45];
+  const callRsi = m.rsi14 >= callRsiRange[0] && m.rsi14 <= callRsiRange[1];
+  const putRsi = m.rsi14 >= putRsiRange[0] && m.rsi14 <= putRsiRange[1];
+  const macdSlopeOk = limits.requireMacdSlope === false
+    ? m.macdHistogram > 0
+    : m.macdHistogram > 0 && m.macdHistogram > m.previousMacdHistogram;
+  const macdSlopeOkPut = limits.requireMacdSlope === false
+    ? m.macdHistogram < 0
+    : m.macdHistogram < 0 && m.macdHistogram < m.previousMacdHistogram;
+  const priceActionCall = limits.requirePriceAction === false ? true : m.lastClose > m.previousCandleHigh;
+  const priceActionPut = limits.requirePriceAction === false ? true : m.lastClose < m.previousCandleLow;
+  const vwapCall = limits.requireVwap === false ? true : m.lastClose > f.vwap;
+  const vwapPut = limits.requireVwap === false ? true : m.lastClose < f.vwap;
   const volumeBaseline = f.futuresVolumeSlotAvg ?? f.futuresVolumeSma20;
   const relativeVol = volumeBaseline > 0 ? f.futuresVolume / volumeBaseline : 0;
 
   const callGates: Gate[] = [
     [hourlyBull, 15, "1-hour bullish trend not confirmed"],
     [fifteenBull, 15, "15-minute bullish EMA structure not confirmed"],
-    [m.lastClose > f.vwap, 15, "Price is not above futures session VWAP"],
+    [vwapCall, 15, "Price is not above futures session VWAP"],
     [m.supertrendDirection === "BULLISH", 10, "Supertrend is not bullish"],
     [m.adx14 >= limits.minAdx && m.plusDi14 > m.minusDi14, 10, "ADX/+DI bullish confirmation failed"],
-    [m.macdHistogram > 0 && m.macdHistogram > m.previousMacdHistogram, 10, "MACD histogram is not positive and rising"],
-    [callRsi, 5, "RSI is outside the call-entry range (55–68)"],
+    [macdSlopeOk, 10, "MACD histogram is not positive and rising"],
+    [callRsi, 5, `RSI is outside the call-entry range (${callRsiRange[0]}–${callRsiRange[1]})`],
     [relativeVol >= limits.minRelativeVolume, 10, "Futures relative volume is below threshold"],
-    [m.lastClose > m.previousCandleHigh, 10, "No completed-candle bullish price-action trigger"],
+    [priceActionCall, 10, "No completed-candle bullish price-action trigger"],
   ];
   const putGates: Gate[] = [
     [hourlyBear, 15, "1-hour bearish trend not confirmed"],
     [fifteenBear, 15, "15-minute bearish EMA structure not confirmed"],
-    [m.lastClose < f.vwap, 15, "Price is not below futures session VWAP"],
+    [vwapPut, 15, "Price is not below futures session VWAP"],
     [m.supertrendDirection === "BEARISH", 10, "Supertrend is not bearish"],
     [m.adx14 >= limits.minAdx && m.minusDi14 > m.plusDi14, 10, "ADX/-DI bearish confirmation failed"],
-    [m.macdHistogram < 0 && m.macdHistogram < m.previousMacdHistogram, 10, "MACD histogram is not negative and falling"],
-    [putRsi, 5, "RSI is outside the put-entry range (32–45)"],
+    [macdSlopeOkPut, 10, "MACD histogram is not negative and falling"],
+    [putRsi, 5, `RSI is outside the put-entry range (${putRsiRange[0]}–${putRsiRange[1]})`],
     [relativeVol >= limits.minRelativeVolume, 10, "Futures relative volume is below threshold"],
-    [m.lastClose < m.previousCandleLow, 10, "No completed-candle bearish price-action trigger"],
+    [priceActionPut, 10, "No completed-candle bearish price-action trigger"],
   ];
 
   if (rejected.length) {
