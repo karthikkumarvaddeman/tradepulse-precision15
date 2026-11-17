@@ -117,6 +117,20 @@ const STRATEGIES: Strat[] = [
   ["VWAP+vol>=1.2", (d, i) => { const a = vwapReclaim(d.candles, i, d.futVwap); return a && d.relVols[i]! >= 1.2 ? a : null; }],
   ["VWAP+early(<13:00)", (d, i) => { const end = candleEnd(d.candles[i]!); const early = end.toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }) <= "13:00"; const a = vwapReclaim(d.candles, i, d.futVwap); return early ? a : null; }],
   ["VWAP+trend+vol", (d, i) => { const a = vwapReclaim(d.candles, i, d.futVwap); return a && d.trends[i] === (a === "BUY_CALL" ? "bull" : "bear") && d.relVols[i]! >= 1.2 ? a : null; }],
+  ["VWAP+buf0.1%", (d, i) => { const prev = d.candles[i - 1]!.close, cur = d.candles[i]!.close, buf = d.futVwap * 0.001;
+    if (prev <= d.futVwap && cur > d.futVwap + buf) return "BUY_CALL";
+    if (prev >= d.futVwap && cur < d.futVwap - buf) return "BUY_PUT";
+    return null; }],
+  ["VWAP+buf0.2%", (d, i) => { const prev = d.candles[i - 1]!.close, cur = d.candles[i]!.close, buf = d.futVwap * 0.002;
+    if (prev <= d.futVwap && cur > d.futVwap + buf) return "BUY_CALL";
+    if (prev >= d.futVwap && cur < d.futVwap - buf) return "BUY_PUT";
+    return null; }],
+  ["VWAP+buf0.1%+trend", (d, i) => { const prev = d.candles[i - 1]!.close, cur = d.candles[i]!.close, buf = d.futVwap * 0.001;
+    let a: Action = null;
+    if (prev <= d.futVwap && cur > d.futVwap + buf) a = "BUY_CALL";
+    if (prev >= d.futVwap && cur < d.futVwap - buf) a = "BUY_PUT";
+    return a && d.trends[i] === (a === "BUY_CALL" ? "bull" : "bear") ? a : null; }],
+  ["VWAP+late(>13:00)", (d, i) => { const end = candleEnd(d.candles[i]!); const late = end.toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }) >= "13:00"; const a = vwapReclaim(d.candles, i, d.futVwap); return late ? a : null; }],
   ["GapFade-0.4%-fill", (d, i) => gapFade(d.candles, d.prevDayClose, i, 0.004), "prevclose"],
   ["GapFade-0.6%-fill", (d, i) => gapFade(d.candles, d.prevDayClose, i, 0.006), "prevclose"],
   ["GapFade-0.8%-fill", (d, i) => gapFade(d.candles, d.prevDayClose, i, 0.008), "prevclose"],

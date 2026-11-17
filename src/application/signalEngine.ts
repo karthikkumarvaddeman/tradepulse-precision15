@@ -252,6 +252,7 @@ export class SignalEngine {
           status.evaluatedAt = new Date().toISOString();
         }
       }
+      await this.updatePaperTrades(new Date());
     } finally {
       this.tickInProgress = false;
     }
@@ -318,10 +319,14 @@ export class SignalEngine {
       const dayKeys = [...byDay.keys()].sort();
       const todayCandles = byDay.get(dayKeys.at(-1) ?? "") ?? [];
       const prevDayClose = dayKeys.length > 1 ? byDay.get(dayKeys.at(-2)!)!.at(-1)!.close : todayCandles[0]?.open ?? 0;
-      const altAction = snapshot.marketOpen
-        ? altEntryAction(env.STRATEGY_MODE, todayCandles, prevDayClose, futuresIndicators15m.vwap)
-        : null;
       const candleTs = spotIndicators15m.candleTimestamp;
+      const latestCandleEnd = new Date(Date.parse(candleTs) + 15 * 60_000);
+      const istHM = latestCandleEnd.toLocaleTimeString("en-GB", { timeZone: this.timeZone, hour: "2-digit", minute: "2-digit", hour12: false });
+      const [ih, im] = istHM.split(":").map(Number);
+      const latestCandleEndMinutes = (ih ?? 0) * 60 + (im ?? 0);
+      const altAction = snapshot.marketOpen
+        ? altEntryAction(env.STRATEGY_MODE, todayCandles, prevDayClose, futuresIndicators15m.vwap, latestCandleEndMinutes)
+        : null;
       status.decision = altAction
         ? { action: altAction, regime: "UNCLEAR", score: 0, reasons: [`STRATEGY_MODE=${env.STRATEGY_MODE} — underlying-level entry, no option contract`], rejectedReasons: [] }
         : { action: "HOLD", regime: "UNCLEAR", score: 0, reasons: [], rejectedReasons: ["No alternative-strategy trigger on the latest completed candle"] };
@@ -345,7 +350,7 @@ export class SignalEngine {
       }
       const decision: SignalDecision = {
         action: altAction, regime: "UNCLEAR", score: 0,
-        reasons: [`STRATEGY_MODE=${env.STRATEGY_MODE} — ${env.STRATEGY_MODE === "vwap" ? "VWAP reclaim" : "gap-fade"} entry`],
+        reasons: [`STRATEGY_MODE=${env.STRATEGY_MODE} — ${env.STRATEGY_MODE === "vwap" ? "VWAP reclaim" : env.STRATEGY_MODE === "gapfade" ? "gap-fade" : "combo (gap-fade / late VWAP)"} entry`],
         rejectedReasons: [],
       };
       const signal = this.buildSignal(symbol, decision, option, spotIndicators15m, futuresInstrument, now);
@@ -355,7 +360,7 @@ export class SignalEngine {
       }
       const dayOpen = todayCandles[0]?.open ?? 0;
       const isGapDay = dayOpen > 0 && Math.abs((dayOpen - prevDayClose) / prevDayClose) > 0.004;
-      const useGapFillTarget = env.STRATEGY_MODE === "gapfade" || (env.STRATEGY_MODE === "combo" && isGapDay);
+      const useGapFillTarget = env.STRATEGY_MODE === "gapfade" || ((env.STRATEGY_MODE === "combo" || env.STRATEGY_MODE === "combo-late") && isGapDay);
       if (useGapFillTarget) {
         // Gap-fill exit: target is previous day's close, mapped to premium via delta approx
         const dir = altAction === "BUY_CALL" ? 1 : -1;
@@ -481,7 +486,7 @@ export class SignalEngine {
     const entryLimitPrice = roundToTick(premiumEntry, option.tickSize, "up");
     const direction = decision.action === "BUY_CALL" ? 1 : -1;
     const underlyingStopDistance = env.STOP_ATR_MULTIPLE * indicators.atr14;
-    const premiumStopDistance = underlyingStopDistance * env.OPTION_DELTA_APPROX;
+    const premiumStopDistance = Math.min(underlyingStopDistance * env.OPTION_DELTA_APPROX, entryLimitPrice * 0.6);
     const premiumStop = roundToTick(entryLimitPrice - premiumStopDistance, option.tickSize, "down");
     if (!(entryLimitPrice > 0 && premiumStop > 0 && premiumStop < entryLimitPrice)) return null;
     const targetDistance = env.TARGET_R_MULTIPLE * (entryLimitPrice - premiumStop);
@@ -495,22 +500,27 @@ export class SignalEngine {
       riskPerTradePercent: env.RISK_PER_TRADE_PERCENT,
       dailyLossLimitPercent: env.MAX_DAILY_LOSS_PERCENT,
     };
-    const risk = calculateAffordableLots({
-      capitalInr: env.TRADING_CAPITAL_INR,
-      premiumEntry: entryLimitPrice,
-      premiumStop,
-      lotSize: option.lotSize,
-      estimatedCostsPerLot: ESTIMATED_COSTS_PER_LOT_INR,
-      slippageBufferPerLot: entryLimitPrice * option.lotSize * SLIPPAGE_BUFFER_PCT,
-    }, riskConfig);
-    if (!risk.affordable) return null;
-    // A long option is paid for in full. Risk-budget sizing alone must not
-    // recommend a premium notional larger than the capital configured by the user.
-    const notionalPerLot = entryLimitPrice * option.lotSize + ESTIMATED_COSTS_PER_LOT_INR;
-    const lotsAffordableByCapital = Math.floor(env.TRADING_CAPITAL_INR / notionalPerLot);
-    const affordableLots = Math.min(risk.affordableLots, lotsAffordableByCapital);
-    if (affordableLots < 1) return null;
-    const riskPerLotInr = risk.riskPerLotInr;
+    const capitalConfigured = env.TRADING_CAPITAL_INR > 0 && env.TRADING_CAPITAL_INR < env.MAX_CAPITAL_INR;
+    let affordableLots = 1;
+    let riskPerLotInr = (entryLimitPrice - premiumStop) * option.lotSize + ESTIMATED_COSTS_PER_LOT_INR + entryLimitPrice * option.lotSize * SLIPPAGE_BUFFER_PCT;
+    if (capitalConfigured) {
+      const risk = calculateAffordableLots({
+        capitalInr: env.TRADING_CAPITAL_INR,
+        premiumEntry: entryLimitPrice,
+        premiumStop,
+        lotSize: option.lotSize,
+        estimatedCostsPerLot: ESTIMATED_COSTS_PER_LOT_INR,
+        slippageBufferPerLot: entryLimitPrice * option.lotSize * SLIPPAGE_BUFFER_PCT,
+      }, riskConfig);
+      if (!risk.affordable) return null;
+      // A long option is paid for in full. Risk-budget sizing alone must not
+      // recommend a premium notional larger than the capital configured by the user.
+      const notionalPerLot = entryLimitPrice * option.lotSize + ESTIMATED_COSTS_PER_LOT_INR;
+      const lotsAffordableByCapital = Math.floor(env.TRADING_CAPITAL_INR / notionalPerLot);
+      affordableLots = Math.min(risk.affordableLots, lotsAffordableByCapital);
+      if (affordableLots < 1) return null;
+      riskPerLotInr = risk.riskPerLotInr;
+    }
     const quantity = affordableLots * option.lotSize;
 
     return {
@@ -552,6 +562,53 @@ export class SignalEngine {
     };
     this.store.add(skipped);
     return skipped;
+  }
+
+  /** Paper-trade each open signal's option against its premium stop/target until EOD. */
+  private async updatePaperTrades(now: Date): Promise<void> {
+    const open = this.store.all().filter((s) =>
+      s.status === "CANDIDATE" && s.option && s.entryLimitPrice != null &&
+      s.stopLossPremium != null && s.targetPremium != null && s.quantity != null);
+    if (!open.length || !kiteConfigured()) return;
+    const keys = open.map((s) => `${s.option!.exchange}:${s.option!.tradingsymbol}`);
+    let quotes: Record<string, { last_price?: number }>;
+    try {
+      quotes = await fetchQuotes(this.credentials, keys);
+    } catch {
+      return; // quote failure must not affect signal state
+    }
+    const hhmm = now.toLocaleTimeString("en-GB", { timeZone: this.timeZone, hour: "2-digit", minute: "2-digit", hour12: false });
+    const isEod = Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3)) >= 15 * 60 + 15;
+    for (const s of open) {
+      const q = quotes[`${s.option!.exchange}:${s.option!.tradingsymbol}`];
+      const ltp = q?.last_price;
+      if (ltp == null || !(ltp > 0)) continue;
+      const entry = s.entryLimitPrice!;
+      let exit: number | null = null;
+      if (ltp <= s.stopLossPremium!) exit = s.stopLossPremium!;
+      else if (ltp >= s.targetPremium!) exit = s.targetPremium!;
+      else if (isEod) exit = ltp;
+      if (exit == null) continue;
+      const pnlInr = (exit - entry) * s.quantity!;
+      this.store.close(s.id, Math.round(pnlInr * 100) / 100, now);
+      this.limiter.markPositionClosed(s.symbol);
+      void this.notifyPaperResult(s, exit, pnlInr);
+    }
+  }
+
+  private async notifyPaperResult(signal: TradingSignal, exitPrice: number, pnlInr: number): Promise<void> {
+    if (!this.telegram?.isConfigured) return;
+    const result = pnlInr >= 0 ? "WIN" : "LOSS";
+    const lines = [
+      `Paper ${result} — ${signal.symbol} ${signal.action}`,
+      `Entry ~${signal.entryLimitPrice} → exit ${exitPrice.toFixed(2)} | P&L ₹${pnlInr.toFixed(0)}`,
+      `Contract: ${signal.option?.exchange}:${signal.option?.tradingsymbol}`,
+    ];
+    try {
+      await this.telegram.send(lines.join("\n"));
+    } catch {
+      // notification failure must not affect signal state
+    }
   }
 
   private async notify(signal: TradingSignal): Promise<void> {
