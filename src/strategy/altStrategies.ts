@@ -8,11 +8,12 @@ export type AltAction = "BUY_CALL" | "BUY_PUT" | null;
  * Backtested ~positive on 6 months of NIFTY/SENSEX data; still unproven live.
  */
 export function altEntryAction(
-  mode: "vwap" | "gapfade" | "combo" | "combo-late",
+  mode: "vwap" | "gapfade" | "combo" | "combo-late" | "combo-regime",
   dayCandles: { open: number; high: number; low: number; close: number }[],
   prevDayClose: number,
   sessionVwap: number,
   latestCandleEndMinutes?: number,
+  prevDayRetPct = 0,
 ): AltAction {
   if (dayCandles.length < 3 || !(sessionVwap > 0) || !(prevDayClose > 0)) return null;
   const prev = dayCandles[dayCandles.length - 2]!;
@@ -20,6 +21,24 @@ export function altEntryAction(
   const open = dayCandles[0]!.open;
   const gapPct = (open - prevDayClose) / prevDayClose;
   const isGapDay = Math.abs(gapPct) > 0.004;
+
+  // combo-regime: regime gate by yesterday's day return.
+  // calm (|ret| <= 0.4%) -> gaps are noise, fade them; skip VWAP.
+  // trending (|ret| > 0.4%) -> don't fade gaps; late VWAP crosses only.
+  if (mode === "combo-regime") {
+    const calm = Math.abs(prevDayRetPct) <= 0.004;
+    if (isGapDay) {
+      if (!calm) return null;
+      if (gapPct > 0.004 && prev.close >= open && cur.close < open && cur.close > prevDayClose) return "BUY_PUT";
+      if (gapPct < -0.004 && prev.close <= open && cur.close > open && cur.close < prevDayClose) return "BUY_CALL";
+      return null;
+    }
+    if (calm) return null;
+    if (latestCandleEndMinutes !== undefined && latestCandleEndMinutes < 13 * 60) return null;
+    if (prev.close <= sessionVwap && cur.close > sessionVwap) return "BUY_CALL";
+    if (prev.close >= sessionVwap && cur.close < sessionVwap) return "BUY_PUT";
+    return null;
+  }
 
   // gapfade: fade >0.4% opening gaps back toward previous day's close.
   // Only fire while price is still on the gap side of prevDayClose (target ahead).

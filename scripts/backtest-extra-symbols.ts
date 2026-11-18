@@ -108,15 +108,19 @@ function simulateOutcome(dayCandles: Candle[], evalIdx: number, action: "BUY_CAL
 }
 
 interface SymCfg { label: string; futName: string; indexMatch: (i: Instrument) => boolean }
-const SYMS: SymCfg[] = [
-  { label: "BANKNIFTY", futName: "BANKNIFTY", indexMatch: (i) => i.tradingsymbol === "NIFTY BANK" || (i.name === "NIFTY BANK" && !i.expiry && !i.strike) },
-  { label: "FINNIFTY", futName: "FINNIFTY", indexMatch: (i) => i.tradingsymbol === "NIFTY FIN SERVICE" || (i.name === "NIFTY FIN SERVICE" && !i.expiry && !i.strike) },
-];
+const STOCKS = ["RELIANCE","TCS","HDFCBANK","ICICIBANK","SBIN","INFY","LT","AXISBANK","KOTAKBANK","BAJFINANCE","MARUTI","SUNPHARMA"];
+const SYMS: SymCfg[] = STOCKS.map((label) => ({
+  label,
+  futName: label,
+  indexMatch: (i: Instrument) => i.tradingsymbol === label && i.instrumentType === "EQ",
+}));
 
 const [nse, nfo] = await Promise.all([getInstruments(creds, "NSE"), getInstruments(creds, "NFO")]);
 const nowD = new Date();
 
+const onlySyms = process.argv[3] ? process.argv[3].split(",") : null;
 for (const sym of SYMS) {
+  if (onlySyms && !onlySyms.includes(sym.label)) continue;
   const index = nse.find(sym.indexMatch);
   if (!index) { console.log(`${sym.label}: index instrument not found in NSE master`); continue; }
   const expiry = nearestExpiry(nfo, sym.futName, "NFO", nowD);

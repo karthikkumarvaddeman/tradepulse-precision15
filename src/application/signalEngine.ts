@@ -4,7 +4,7 @@ import { env, kiteConfigured } from "../config/env.js";
 import { updateEnvValue } from "../config/envFile.js";
 import { DEFAULTS } from "../config/defaults.js";
 import type { Candle, IndexSymbol, MarketSnapshot, OptionCandidate, OptionType, SignalDecision, TradingSignal } from "../domain/types.js";
-import { getInstruments, listOptionContracts, resolveFuturesInstrument, resolveIndexInstrument, type Instrument } from "../broker/instrumentMaster.js";
+import { getInstruments, listOptionContracts, nearestExpiry, resolveFuturesInstrument, resolveIndexInstrument, type Instrument } from "../broker/instrumentMaster.js";
 import { fetchHistoricalCandles, fetchQuotes, requestAccessToken, type KiteCredentials, type KiteCandle } from "../broker/kiteClient.js";
 import { buildFuturesIndicators, buildHourlyIndicators, buildSpotIndicators15m } from "./snapshotBuilder.js";
 import { completedCandles, isMarketOpen, isWithinEntryWindow, istDateKey } from "./marketClock.js";
@@ -80,6 +80,8 @@ export class SignalEngine {
   private telegramTimer: NodeJS.Timeout | null = null;
   private telegramOffset = 0;
   private telegramPrimed = false;
+  private readonly watchlistSeen = new Set<string>();
+  private watchlistDateKey = "";
   private readonly envFilePath = path.resolve(process.cwd(), ".env");
 
   constructor(options: { store: SignalStore; pollMs?: number }) {
@@ -253,6 +255,7 @@ export class SignalEngine {
         }
       }
       await this.updatePaperTrades(new Date());
+      await this.updateWatchlist(new Date());
     } finally {
       this.tickInProgress = false;
     }
@@ -318,14 +321,17 @@ export class SignalEngine {
       }
       const dayKeys = [...byDay.keys()].sort();
       const todayCandles = byDay.get(dayKeys.at(-1) ?? "") ?? [];
-      const prevDayClose = dayKeys.length > 1 ? byDay.get(dayKeys.at(-2)!)!.at(-1)!.close : todayCandles[0]?.open ?? 0;
+      const prevDayCandles = dayKeys.length > 1 ? byDay.get(dayKeys.at(-2)!) ?? [] : [];
+      const prevDayClose = prevDayCandles.length ? prevDayCandles.at(-1)!.close : todayCandles[0]?.open ?? 0;
+      const prevDayOpen = prevDayCandles.length ? prevDayCandles[0]!.open : prevDayClose;
+      const prevDayRetPct = prevDayOpen > 0 ? (prevDayClose - prevDayOpen) / prevDayOpen : 0;
       const candleTs = spotIndicators15m.candleTimestamp;
       const latestCandleEnd = new Date(Date.parse(candleTs) + 15 * 60_000);
       const istHM = latestCandleEnd.toLocaleTimeString("en-GB", { timeZone: this.timeZone, hour: "2-digit", minute: "2-digit", hour12: false });
       const [ih, im] = istHM.split(":").map(Number);
       const latestCandleEndMinutes = (ih ?? 0) * 60 + (im ?? 0);
       const altAction = snapshot.marketOpen
-        ? altEntryAction(env.STRATEGY_MODE, todayCandles, prevDayClose, futuresIndicators15m.vwap, latestCandleEndMinutes)
+        ? altEntryAction(env.STRATEGY_MODE, todayCandles, prevDayClose, futuresIndicators15m.vwap, latestCandleEndMinutes, prevDayRetPct)
         : null;
       status.decision = altAction
         ? { action: altAction, regime: "UNCLEAR", score: 0, reasons: [`STRATEGY_MODE=${env.STRATEGY_MODE} — underlying-level entry, no option contract`], rejectedReasons: [] }
@@ -350,7 +356,7 @@ export class SignalEngine {
       }
       const decision: SignalDecision = {
         action: altAction, regime: "UNCLEAR", score: 0,
-        reasons: [`STRATEGY_MODE=${env.STRATEGY_MODE} — ${env.STRATEGY_MODE === "vwap" ? "VWAP reclaim" : env.STRATEGY_MODE === "gapfade" ? "gap-fade" : "combo (gap-fade / late VWAP)"} entry`],
+        reasons: [`STRATEGY_MODE=${env.STRATEGY_MODE} — ${env.STRATEGY_MODE === "vwap" ? "VWAP reclaim" : env.STRATEGY_MODE === "gapfade" ? "gap-fade" : env.STRATEGY_MODE === "combo-regime" ? "regime combo (calm=gap-fade / trend=late VWAP)" : "combo (gap-fade / late VWAP)"} entry`],
         rejectedReasons: [],
       };
       const signal = this.buildSignal(symbol, decision, option, spotIndicators15m, futuresInstrument, now);
@@ -360,7 +366,7 @@ export class SignalEngine {
       }
       const dayOpen = todayCandles[0]?.open ?? 0;
       const isGapDay = dayOpen > 0 && Math.abs((dayOpen - prevDayClose) / prevDayClose) > 0.004;
-      const useGapFillTarget = env.STRATEGY_MODE === "gapfade" || ((env.STRATEGY_MODE === "combo" || env.STRATEGY_MODE === "combo-late") && isGapDay);
+      const useGapFillTarget = env.STRATEGY_MODE === "gapfade" || ((env.STRATEGY_MODE === "combo" || env.STRATEGY_MODE === "combo-late" || env.STRATEGY_MODE === "combo-regime") && isGapDay);
       if (useGapFillTarget) {
         // Gap-fill exit: target is previous day's close, mapped to premium via delta approx
         const dir = altAction === "BUY_CALL" ? 1 : -1;
@@ -425,6 +431,82 @@ export class SignalEngine {
     this.limiter.markPositionOpen(symbol);
     status.suppressedReason = null;
     void this.notify(signal);
+  }
+
+  /**
+   * Watchlist mode: evaluate extra stocks with the same alt-strategy triggers
+   * and send Telegram "watch-only" alerts. Never creates signals, paper
+   * trades, or consumes daily caps — informational only.
+   */
+  private async updateWatchlist(now: Date): Promise<void> {
+    if (env.WATCHLIST_ENABLED !== "true" || env.STRATEGY_MODE === "precision15" || !kiteConfigured()) return;
+    if (!isMarketOpen(now, this.timeZone) || !this.telegram?.isConfigured) return;
+    const stocks = env.WATCHLIST_STOCKS.split(",").map((x) => x.trim()).filter(Boolean);
+    if (!stocks.length) return;
+    const todayKey = istDateKey(now, this.timeZone);
+    if (this.watchlistDateKey !== todayKey) { this.watchlistSeen.clear(); this.watchlistDateKey = todayKey; }
+
+    const [nse, nfo] = await Promise.all([getInstruments(this.credentials, "NSE"), getInstruments(this.credentials, "NFO")]);
+    const from = new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000);
+    for (const symbol of stocks) {
+      try {
+        const spot = nse.find((i) => i.tradingsymbol === symbol && i.instrumentType === "EQ");
+        if (!spot) continue;
+        const expiry = nearestExpiry(nfo, symbol, "NFO", now);
+        const fut = nfo.find((i) => i.exchange === "NFO" && i.name === symbol && i.instrumentType === "FUT" && i.expiry === expiry);
+        if (!fut) continue;
+        const [spotRaw, futRaw] = await Promise.all([
+          fetchHistoricalCandles(this.credentials, spot.instrumentToken, "15minute", from, now, false, this.timeZone),
+          fetchHistoricalCandles(this.credentials, fut.instrumentToken, "15minute", from, now, true, this.timeZone),
+        ]);
+        const spot15 = completedCandles(spotRaw.map(toCandle), 15, now);
+        const fut15 = completedCandles(futRaw.map(toCandle), 15, now);
+        if (spot15.length < 30 || !fut15.length) continue;
+
+        const byDay = new Map<string, Candle[]>();
+        for (const c of spot15) {
+          const k = istDateKey(new Date(Date.parse(c.timestamp) + 15 * 60_000), this.timeZone);
+          const arr = byDay.get(k) ?? [];
+          arr.push(c);
+          byDay.set(k, arr);
+        }
+        const dayKeys = [...byDay.keys()].sort();
+        const todayCandles = byDay.get(dayKeys.at(-1) ?? "") ?? [];
+        const prevDayCandles = dayKeys.length > 1 ? byDay.get(dayKeys.at(-2)!) ?? [] : [];
+        if (todayCandles.length < 3 || !prevDayCandles.length) continue;
+        const prevDayOpen = prevDayCandles[0]!.open;
+        const prevDayClose = prevDayCandles.at(-1)!.close;
+        const prevDayRetPct = prevDayOpen > 0 ? (prevDayClose - prevDayOpen) / prevDayOpen : 0;
+
+        // session VWAP from today's futures candles (typical price x volume)
+        const futToday = new Map(fut15.map((c) => [c.timestamp, c]));
+        let pv = 0, vv = 0;
+        for (const c of todayCandles) {
+          const f = futToday.get(c.timestamp);
+          if (!f || !f.volume) continue;
+          pv += ((f.high + f.low + f.close) / 3) * f.volume;
+          vv += f.volume;
+        }
+        const sessionVwap = vv > 0 ? pv / vv : 0;
+        if (!(sessionVwap > 0)) continue;
+
+        const lastCandleTs = spot15.at(-1)!.timestamp;
+        const end = new Date(Date.parse(lastCandleTs) + 15 * 60_000);
+        const hm = end.toLocaleTimeString("en-GB", { timeZone: this.timeZone, hour: "2-digit", minute: "2-digit", hour12: false });
+        const [hh, mm] = hm.split(":").map(Number);
+        const endMinutes = (hh ?? 0) * 60 + (mm ?? 0);
+
+        const action = altEntryAction(env.STRATEGY_MODE, todayCandles, prevDayClose, sessionVwap, endMinutes, prevDayRetPct);
+        if (!action) continue;
+        const dedupeKey = `${symbol}:${istDateKey(now, this.timeZone)}:${lastCandleTs}`;
+        if (this.watchlistSeen.has(dedupeKey)) continue;
+        this.watchlistSeen.add(dedupeKey);
+        const px = todayCandles.at(-1)!.close;
+        await this.telegram.send(`WATCH ${symbol} ${action} @${px.toFixed(2)} — ${env.STRATEGY_MODE} trigger | watch-only, not a trade signal`);
+      } catch {
+        // per-stock failures are non-fatal
+      }
+    }
   }
 
   private async selectOption(

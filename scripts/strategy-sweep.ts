@@ -3,7 +3,7 @@ import { getInstruments, resolveFuturesInstrument, resolveIndexInstrument } from
 import { fetchHistoricalCandles, type KiteCredentials, type KiteCandle } from "../src/broker/kiteClient.js";
 import { buildFuturesIndicators, buildSpotIndicators15m } from "../src/application/snapshotBuilder.js";
 import { isMarketOpen, isWithinEntryWindow } from "../src/application/marketClock.js";
-import { atr } from "../src/indicators/indicators.js";
+import { atr, bollinger, ema, rsi, supertrend } from "../src/indicators/indicators.js";
 import { DEFAULTS } from "../src/config/defaults.js";
 import type { Candle } from "../src/domain/types.js";
 
@@ -70,6 +70,74 @@ function gapFade(dayCandles: Candle[], prevDayClose: number, evalIdx: number, mi
   return null;
 }
 
+function gapFollow(dayCandles: Candle[], prevDayClose: number, evalIdx: number, minGap = 0.004): Action {
+  if (dayCandles.length < 3 || evalIdx < 2) return null;
+  const open = dayCandles[0]!.open;
+  const gapPct = (open - prevDayClose) / prevDayClose;
+  if (Math.abs(gapPct) <= minGap) return null;
+  const prev = dayCandles[evalIdx - 1]!.close;
+  const cur = dayCandles[evalIdx]!.close;
+  if (gapPct > minGap && prev <= open && cur > open) return "BUY_CALL";
+  if (gapPct < -minGap && prev >= open && cur < open) return "BUY_PUT";
+  return null;
+}
+
+// RSI(2) mean reversion on intraday closes: extreme oversold -> CALL, overbought -> PUT
+function rsi2Fade(dayCandles: Candle[], evalIdx: number, lo = 10, hi = 90): Action {
+  if (evalIdx < 4) return null;
+  const closes = dayCandles.slice(0, evalIdx + 1).map((c) => c.close);
+  const r = rsi(closes, 2);
+  if (r == null) return null;
+  if (r < lo) return "BUY_CALL";
+  if (r > hi) return "BUY_PUT";
+  return null;
+}
+
+// Bollinger(10,2) fade: close outside band -> trade back toward middle
+function bbFade(dayCandles: Candle[], evalIdx: number, period = 10): Action {
+  if (evalIdx < period) return null;
+  const closes = dayCandles.slice(0, evalIdx + 1).map((c) => c.close);
+  const bb = bollinger(closes, period, 2);
+  if (!bb) return null;
+  const cur = dayCandles[evalIdx]!.close;
+  if (cur < bb.lower) return "BUY_CALL";
+  if (cur > bb.upper) return "BUY_PUT";
+  return null;
+}
+
+// N consecutive same-direction closes -> fade the streak
+function streakFade(dayCandles: Candle[], evalIdx: number, n = 3): Action {
+  if (evalIdx < n) return null;
+  const closes = dayCandles.slice(evalIdx - n, evalIdx + 1).map((c) => c.close);
+  const down = closes.every((c, i) => i === 0 || c < closes[i - 1]!);
+  const up = closes.every((c, i) => i === 0 || c > closes[i - 1]!);
+  if (down) return "BUY_CALL";
+  if (up) return "BUY_PUT";
+  return null;
+}
+
+// EMA fast/slow cross on intraday closes (day-candles only, so use 5/10 for warmup)
+function maCross(dayCandles: Candle[], evalIdx: number, fast = 5, slow = 10): Action {
+  if (evalIdx < slow + 1) return null;
+  const closes = dayCandles.slice(0, evalIdx + 1).map((c) => c.close);
+  const prevCloses = dayCandles.slice(0, evalIdx).map((c) => c.close);
+  const f = ema(closes, fast), fp = ema(prevCloses, fast);
+  const sl = ema(closes, slow), sp = ema(prevCloses, slow);
+  if (f == null || fp == null || sl == null || sp == null) return null;
+  if (fp <= sp && f > sl) return "BUY_CALL";
+  if (fp >= sp && f < sl) return "BUY_PUT";
+  return null;
+}
+
+// Supertrend direction flip, evaluated on candles up to evalIdx
+function stFlip(dayCandles: Candle[], evalIdx: number, period = 7, mult = 2): Action {
+  if (evalIdx < period + 2) return null;
+  const now = supertrend(dayCandles.slice(0, evalIdx + 1), period, mult);
+  const prev = supertrend(dayCandles.slice(0, evalIdx), period, mult);
+  if (!now || !prev || now === prev) return null;
+  return now === "BULLISH" ? "BUY_CALL" : "BUY_PUT";
+}
+
 // outcome with explicit target price (gap-fill) instead of R-multiple
 function simulateOutcomePx(dayCandles: Candle[], evalIdx: number, action: "BUY_CALL" | "BUY_PUT", entry: number, atr14: number, targetPx: number) {
   const dir = action === "BUY_CALL" ? 1 : -1;
@@ -107,7 +175,7 @@ function simulateOutcome(dayCandles: Candle[], evalIdx: number, action: "BUY_CAL
   return { result: "EOD" as const, pnl: dir * (exit - entry), mfe };
 }
 
-interface DayData { symbol: string; date: string; candles: Candle[]; atr14: number; futVwap: number; prevDayClose: number; trends: ("bull" | "bear" | null)[]; relVols: number[] }
+interface DayData { symbol: string; date: string; candles: Candle[]; atr14: number; futVwap: number; prevDayClose: number; prevDayHigh: number; prevDayLow: number; prevDayRetPct: number; trends: ("bull" | "bear" | null)[]; relVols: number[] }
 
 // [name, entryFn, exitMode] — exitMode "atr" = 1.5R target, "prevclose" = gap-fill target
 type Strat = [string, (d: DayData, i: number) => Action, ("atr" | "prevclose" | "comboauto")?];
@@ -134,6 +202,44 @@ const STRATEGIES: Strat[] = [
   ["GapFade-0.4%-fill", (d, i) => gapFade(d.candles, d.prevDayClose, i, 0.004), "prevclose"],
   ["GapFade-0.6%-fill", (d, i) => gapFade(d.candles, d.prevDayClose, i, 0.006), "prevclose"],
   ["GapFade-0.8%-fill", (d, i) => gapFade(d.candles, d.prevDayClose, i, 0.008), "prevclose"],
+  ["GapFollow-0.4%", (d, i) => gapFollow(d.candles, d.prevDayClose, i, 0.004)],
+  ["GapFollow-0.6%", (d, i) => gapFollow(d.candles, d.prevDayClose, i, 0.006)],
+  ["GapFollow-0.4%+late", (d, i) => { const end = candleEnd(d.candles[i]!); const late = end.toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }) >= "13:00"; return late ? gapFollow(d.candles, d.prevDayClose, i, 0.004) : null; }],
+  ["RSI2-fade(<10/>90)", (d, i) => rsi2Fade(d.candles, i)],
+  ["RSI2-fade+late", (d, i) => { const end = candleEnd(d.candles[i]!); const late = end.toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }) >= "13:00"; return late ? rsi2Fade(d.candles, i) : null; }],
+  ["BB10-fade", (d, i) => bbFade(d.candles, i)],
+  ["Streak3-fade", (d, i) => streakFade(d.candles, i, 3)],
+  ["PrevDayH/L-break", (d, i) => { if (i < 2) return null; const prev = d.candles[i - 1]!.close, cur = d.candles[i]!.close;
+    if (prev <= d.prevDayHigh && cur > d.prevDayHigh) return "BUY_CALL";
+    if (prev >= d.prevDayLow && cur < d.prevDayLow) return "BUY_PUT";
+    return null; }],
+  ["EMA5x10-cross", (d, i) => maCross(d.candles, i, 5, 10)],
+  ["EMA9x21-cross", (d, i) => maCross(d.candles, i, 9, 21)],
+  ["Supertrend7x2-flip", (d, i) => stFlip(d.candles, i, 7, 2)],
+  ["Supertrend10x3-flip", (d, i) => stFlip(d.candles, i, 10, 3)],
+  // ---- regime filter: |prevDayRetPct| > 0.4% = trending regime, <= = chop ----
+  ["GF-fill+trendRegime", (d, i) => Math.abs(d.prevDayRetPct) > 0.004 ? gapFade(d.candles, d.prevDayClose, i, 0.004) : null, "prevclose"],
+  ["GF-fill+chopRegime", (d, i) => Math.abs(d.prevDayRetPct) <= 0.004 ? gapFade(d.candles, d.prevDayClose, i, 0.004) : null, "prevclose"],
+  ["VWAPlate+trendRegime", (d, i) => { const end = candleEnd(d.candles[i]!); const late = end.toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }) >= "13:00"; return late && Math.abs(d.prevDayRetPct) > 0.004 ? vwapReclaim(d.candles, i, d.futVwap) : null; }],
+  ["VWAPlate+chopRegime", (d, i) => { const end = candleEnd(d.candles[i]!); const late = end.toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }) >= "13:00"; return late && Math.abs(d.prevDayRetPct) <= 0.004 ? vwapReclaim(d.candles, i, d.futVwap) : null; }],
+  ["ST10x3+trendRegime", (d, i) => Math.abs(d.prevDayRetPct) > 0.004 ? stFlip(d.candles, i, 10, 3) : null],
+  ["ST10x3+chopRegime", (d, i) => Math.abs(d.prevDayRetPct) <= 0.004 ? stFlip(d.candles, i, 10, 3) : null],
+  ["EMA5x10+trendRegime", (d, i) => Math.abs(d.prevDayRetPct) > 0.004 ? maCross(d.candles, i, 5, 10) : null],
+  ["EMA5x10+chopRegime", (d, i) => Math.abs(d.prevDayRetPct) <= 0.004 ? maCross(d.candles, i, 5, 10) : null],
+  ["ComboLate+trendRegime", (d, i) => { if (Math.abs(d.prevDayRetPct) <= 0.004) return null;
+    const open = d.candles[0]!.open; const isGap = Math.abs((open - d.prevDayClose) / d.prevDayClose) > 0.004;
+    if (isGap) return gapFade(d.candles, d.prevDayClose, i, 0.004);
+    const end = candleEnd(d.candles[i]!); const late = end.toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }) >= "13:00";
+    return late ? vwapReclaim(d.candles, i, d.futVwap) : null; }, "comboauto"],
+  ["ComboRegime", (d, i) => {
+    const calm = Math.abs(d.prevDayRetPct) <= 0.004;
+    const open = d.candles[0]!.open;
+    const isGap = Math.abs((open - d.prevDayClose) / d.prevDayClose) > 0.004;
+    if (isGap) return calm ? gapFade(d.candles, d.prevDayClose, i, 0.004) : null;
+    const end = candleEnd(d.candles[i]!);
+    const late = end.toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }) >= "13:00";
+    return late && !calm ? vwapReclaim(d.candles, i, d.futVwap) : null;
+  }, "comboauto"],
   ["Combo-gap+vwap", (d, i) => gapFade(d.candles, d.prevDayClose, i, 0.004) ?? vwapReclaim(d.candles, i, d.futVwap), "comboauto"],
 ];
 
@@ -178,7 +284,12 @@ for (const symbol of ["NIFTY", "SENSEX"] as const) {
       const v = futDay.reduce((s, c) => s + (c.volume || 1), 0);
       return v > 0 ? tp / v : 0;
     })();
-    const prevClose = di > 0 ? byDay.get(sortedDays[di - 1]!)!.at(-1)!.close : candles[0]!.open;
+    const prevDayCandles = di > 0 ? byDay.get(sortedDays[di - 1]!)! : [];
+    const prevClose = prevDayCandles.length ? prevDayCandles.at(-1)!.close : candles[0]!.open;
+    const prevDayHigh = prevDayCandles.length ? Math.max(...prevDayCandles.map((c) => c.high)) : candles[0]!.high;
+    const prevDayLow = prevDayCandles.length ? Math.min(...prevDayCandles.map((c) => c.low)) : candles[0]!.low;
+    const prevDayOpen = prevDayCandles.length ? prevDayCandles[0]!.open : candles[0]!.open;
+    const prevDayRetPct = prevDayOpen > 0 ? (prevClose - prevDayOpen) / prevDayOpen : 0;
     // per-candle: 1h trend (last completed hourly candle before this candle's end) and futures rel volume vs day-so-far avg
     const trends: ("bull" | "bear" | null)[] = [];
     const relVols: number[] = [];
@@ -192,12 +303,14 @@ for (const symbol of ["NIFTY", "SENSEX"] as const) {
       relVols.push(avgSoFar > 0 ? fv / avgSoFar : 1);
       futVolSum += fv;
     }
-    days.push({ symbol, date, candles, atr14, futVwap, prevDayClose: prevClose, trends, relVols });
+    days.push({ symbol, date, candles, atr14, futVwap, prevDayClose: prevClose, prevDayHigh, prevDayLow, prevDayRetPct, trends, relVols });
   }
 }
 console.log(`Trading days loaded: ${days.length}`);
 
+const only = process.argv[3];
 for (const [name, fn, exitMode] of STRATEGIES) {
+  if (only && !name.toLowerCase().includes(only.toLowerCase())) continue;
   let w = 0, l = 0, e = 0, pts = 0, signals = 0, mfes = 0;
   const dailyCounts = new Map<string, number>();
   const openDays = new Set<string>();
