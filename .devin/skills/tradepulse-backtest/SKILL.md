@@ -35,7 +35,8 @@ Local signal assistant for NIFTY/SENSEX options. User executes orders manually o
 - <30 trades = noise; require consistent edge across regimes before trusting
 - Conservative sim: candle spanning both stop+target counts as LOSS
 - Known-good baseline (248 days): combo = gapfade(>0.4% gap, target prev close) on gap days + VWAP-reclaim otherwise → 57 trades, +3549 pts. VWAP-only +1386/27, gapfade-only +3029/36, precision15 −486/~8
-- Tested-and-rejected: ORB (−1622), volume filters (−494), trend filters (+906 < +1386), MACD/RSI gate loosening
+- 180-day sweep (2026-11): ST10x3-flip on day candles = 35 trades, +1589 pts (all entries ≥12:45 IST); EMA5x10-cross = 130 trades, +2990 pts (thin per-trade edge); ComboRegime = 17 trades, +2352 pts. `STRATEGY_MODE=supertrend` implements the ST10x3 flip live. NOTE: sweep futVwap uses full-day candles (lookahead) — VWAP-based rows are optimistic; ST/EMA rows are unaffected.
+- Tested-and-rejected: ORB (−1622), volume filters (−494), trend filters (+906 < +1386), MACD/RSI gate loosening, ST10x3+MACD-confirm (MACD needs >25 candles warmup; day-candle MACD never fires)
 
 ## Live ops
 - Daily Kite token required: Telegram request_token flow or /callback page

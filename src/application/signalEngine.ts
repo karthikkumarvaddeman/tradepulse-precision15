@@ -331,7 +331,7 @@ export class SignalEngine {
       const [ih, im] = istHM.split(":").map(Number);
       const latestCandleEndMinutes = (ih ?? 0) * 60 + (im ?? 0);
       const altAction = snapshot.marketOpen
-        ? altEntryAction(env.STRATEGY_MODE, todayCandles, prevDayClose, futuresIndicators15m.vwap, latestCandleEndMinutes, prevDayRetPct)
+        ? altEntryAction(env.STRATEGY_MODE, todayCandles, prevDayClose, futuresIndicators15m.vwap, latestCandleEndMinutes, prevDayRetPct, spot15m)
         : null;
       status.decision = altAction
         ? { action: altAction, regime: "UNCLEAR", score: 0, reasons: [`STRATEGY_MODE=${env.STRATEGY_MODE} — underlying-level entry, no option contract`], rejectedReasons: [] }
@@ -356,7 +356,7 @@ export class SignalEngine {
       }
       const decision: SignalDecision = {
         action: altAction, regime: "UNCLEAR", score: 0,
-        reasons: [`STRATEGY_MODE=${env.STRATEGY_MODE} — ${env.STRATEGY_MODE === "vwap" ? "VWAP reclaim" : env.STRATEGY_MODE === "gapfade" ? "gap-fade" : env.STRATEGY_MODE === "combo-regime" ? "regime combo (calm=gap-fade / trend=late VWAP)" : "combo (gap-fade / late VWAP)"} entry`],
+        reasons: [`STRATEGY_MODE=${env.STRATEGY_MODE} — ${env.STRATEGY_MODE === "vwap" ? "VWAP reclaim" : env.STRATEGY_MODE === "gapfade" ? "gap-fade" : env.STRATEGY_MODE === "supertrend" ? "15m Supertrend(14,3) flip" : env.STRATEGY_MODE === "combo-regime" ? "regime combo (calm=gap-fade / trend=late VWAP)" : "combo (gap-fade / late VWAP)"} entry`],
         rejectedReasons: [],
       };
       const signal = this.buildSignal(symbol, decision, option, spotIndicators15m, futuresInstrument, now);
