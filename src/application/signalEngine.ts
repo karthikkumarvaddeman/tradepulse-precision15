@@ -9,7 +9,8 @@ import { fetchHistoricalCandles, fetchQuotes, requestAccessToken, type KiteCrede
 import { buildFuturesIndicators, buildHourlyIndicators, buildSpotIndicators15m } from "./snapshotBuilder.js";
 import { completedCandles, isMarketOpen, isWithinEntryWindow, istDateKey } from "./marketClock.js";
 import { evaluatePrecision15 } from "../strategy/precisionStrategy.js";
-import { altEntryAction } from "../strategy/altStrategies.js";
+import { altEntryAction, supertrendFlipAt } from "../strategy/altStrategies.js";
+import { ema, supertrend, vwap } from "../indicators/indicators.js";
 import { chooseLiquidOption } from "../options/optionSelector.js";
 import { calculateAffordableLots, DEFAULT_RISK_CONFIG, hasHitDailyLossLimit } from "../risk/riskManager.js";
 import { DailySignalLimiter } from "./dailySignalLimiter.js";
@@ -82,6 +83,7 @@ export class SignalEngine {
   private telegramPrimed = false;
   private readonly watchlistSeen = new Set<string>();
   private watchlistDateKey = "";
+  private lastBriefAt = 0;
   private readonly envFilePath = path.resolve(process.cwd(), ".env");
 
   constructor(options: { store: SignalStore; pollMs?: number }) {
@@ -256,6 +258,7 @@ export class SignalEngine {
       }
       await this.updatePaperTrades(new Date());
       await this.updateWatchlist(new Date());
+      await this.maybeMarketBrief(new Date());
     } finally {
       this.tickInProgress = false;
     }
@@ -330,17 +333,39 @@ export class SignalEngine {
       const istHM = latestCandleEnd.toLocaleTimeString("en-GB", { timeZone: this.timeZone, hour: "2-digit", minute: "2-digit", hour12: false });
       const [ih, im] = istHM.split(":").map(Number);
       const latestCandleEndMinutes = (ih ?? 0) * 60 + (im ?? 0);
-      const altAction = snapshot.marketOpen
-        ? altEntryAction(env.STRATEGY_MODE, todayCandles, prevDayClose, futuresIndicators15m.vwap, latestCandleEndMinutes, prevDayRetPct, spot15m)
-        : null;
+      const altDateKey = istDateKey(now, this.timeZone);
+      let altAction: ReturnType<typeof altEntryAction> = null;
+      let triggerCandleTs = candleTs;
+      let catchUp = false;
+      if (env.STRATEGY_MODE === "supertrend" && snapshot.marketOpen) {
+        // Catch-up scan: walk every completed candle today so a flip that
+        // occurred while the engine had no valid data (e.g. expired Kite
+        // token) still produces a signal, marked as a late catch-up.
+        const dayStartIdx = Math.max(0, spot15m.length - todayCandles.length);
+        for (let i = dayStartIdx; i < spot15m.length; i++) {
+          const a = supertrendFlipAt(spot15m, i);
+          if (!a) continue;
+          const ts = spot15m[i]!.timestamp;
+          const candleEnd = new Date(Date.parse(ts) + 15 * 60_000);
+          if (!isWithinEntryWindow(candleEnd, this.timeZone)) continue;
+          if (!this.limiter.canEmit(altDateKey, symbol, ts)) continue;
+          altAction = a;
+          triggerCandleTs = ts;
+          catchUp = ts !== candleTs;
+          break;
+        }
+      } else {
+        altAction = snapshot.marketOpen
+          ? altEntryAction(env.STRATEGY_MODE, todayCandles, prevDayClose, futuresIndicators15m.vwap, latestCandleEndMinutes, prevDayRetPct, spot15m)
+          : null;
+      }
       status.decision = altAction
         ? { action: altAction, regime: "UNCLEAR", score: 0, reasons: [`STRATEGY_MODE=${env.STRATEGY_MODE} — underlying-level entry, no option contract`], rejectedReasons: [] }
         : { action: "HOLD", regime: "UNCLEAR", score: 0, reasons: [], rejectedReasons: ["No alternative-strategy trigger on the latest completed candle"] };
-      status.candleTimestamp = candleTs;
+      status.candleTimestamp = altAction ? triggerCandleTs : candleTs;
       status.dataAsOf = spotIndicators15m.dataAsOf;
       if (!altAction) return;
-      const altDateKey = istDateKey(now, this.timeZone);
-      if (!this.limiter.canEmit(altDateKey, symbol, candleTs)) {
+      if (!this.limiter.canEmit(altDateKey, symbol, triggerCandleTs)) {
         status.suppressedReason = "Daily signal cap reached, duplicate candle, or an open recommendation exists.";
         return;
       }
@@ -359,7 +384,8 @@ export class SignalEngine {
         reasons: [`STRATEGY_MODE=${env.STRATEGY_MODE} — ${env.STRATEGY_MODE === "vwap" ? "VWAP reclaim" : env.STRATEGY_MODE === "gapfade" ? "gap-fade" : env.STRATEGY_MODE === "supertrend" ? "15m Supertrend(14,3) flip" : env.STRATEGY_MODE === "combo-regime" ? "regime combo (calm=gap-fade / trend=late VWAP)" : "combo (gap-fade / late VWAP)"} entry`],
         rejectedReasons: [],
       };
-      const signal = this.buildSignal(symbol, decision, option, spotIndicators15m, futuresInstrument, now);
+      if (catchUp) decision.reasons.push(`Late catch-up: flip detected on candle ${triggerCandleTs} (engine was not evaluating at that time). Verify the move is still valid before entering.`);
+      const signal = this.buildSignal(symbol, decision, option, { ...spotIndicators15m, candleTimestamp: triggerCandleTs }, futuresInstrument, now);
       if (!signal) {
         status.suppressedReason = "Risk budget check failed for the selected option.";
         return;
@@ -431,6 +457,71 @@ export class SignalEngine {
     this.limiter.markPositionOpen(symbol);
     status.suppressedReason = null;
     void this.notify(signal);
+  }
+
+  /** Hourly market-trend brief to Telegram during market hours. */
+  private async maybeMarketBrief(now: Date): Promise<void> {
+    if (!this.telegram?.isConfigured || !kiteConfigured()) return;
+    if (!isMarketOpen(now, this.timeZone)) { this.lastBriefAt = 0; return; }
+    if (now.getTime() - this.lastBriefAt < 55 * 60_000) return;
+    this.lastBriefAt = now.getTime();
+    try {
+      await this.sendMarketBrief(now);
+    } catch {
+      // brief failure is non-fatal; retry next hour
+    }
+  }
+
+  private async sendMarketBrief(now: Date): Promise<void> {
+    if (!this.telegram) return;
+    const todayKey = istDateKey(now, this.timeZone);
+    const dayKeyOf = (c: Candle) => istDateKey(new Date(Date.parse(c.timestamp) + 15 * 60_000), this.timeZone);
+    const lines: string[] = [`📈 Market brief — ${now.toLocaleTimeString("en-IN", { timeZone: this.timeZone, hour: "2-digit", minute: "2-digit", hour12: false })} IST`];
+    const biases: string[] = [];
+
+    for (const symbol of SYMBOLS) {
+      const spotEx = SPOT_EXCHANGE[symbol];
+      const futEx = FUTURES_EXCHANGE[symbol];
+      const [spotMaster, futMaster] = await Promise.all([getInstruments(this.credentials, spotEx), getInstruments(this.credentials, futEx)]);
+      const index = resolveIndexInstrument(spotMaster, symbol);
+      const fut = resolveFuturesInstrument(futMaster, symbol, now);
+      const from = new Date(now.getTime() - 8 * 86400e3);
+      const from1h = new Date(now.getTime() - 30 * 86400e3);
+      const [spotRaw, futRaw, hourRaw] = await Promise.all([
+        fetchHistoricalCandles(this.credentials, index.instrumentToken, "15minute", from, now, false, this.timeZone),
+        fetchHistoricalCandles(this.credentials, fut.instrumentToken, "15minute", from, now, true, this.timeZone),
+        fetchHistoricalCandles(this.credentials, index.instrumentToken, "60minute", from1h, now, false, this.timeZone),
+      ]);
+      const spot = completedCandles(spotRaw.map(toCandle), 15, now);
+      const futs = completedCandles(futRaw.map(toCandle), 15, now);
+      const hours = completedCandles(hourRaw.map(toCandle), 60, now);
+      const today = spot.filter((c) => dayKeyOf(c) === todayKey);
+      const prevClose = [...spot].reverse().find((c) => dayKeyOf(c) !== todayKey)?.close ?? 0;
+      const last = spot.at(-1);
+      if (!last || !today.length || !(prevClose > 0)) continue;
+
+      const open = today[0]!.open;
+      const hi = Math.max(...today.map((c) => c.high));
+      const lo = Math.min(...today.map((c) => c.low));
+      const chgPct = ((last.close - prevClose) / prevClose) * 100;
+      const futVwap = vwap(futs.filter((c) => dayKeyOf(c) === todayKey));
+      const st = supertrend(spot, 14, 3);
+      const e20 = ema(hours.map((c) => c.close), 20);
+      const e50 = ema(hours.map((c) => c.close), 50);
+      const vsVwap = futVwap && last.close > futVwap ? "above VWAP" : futVwap ? "below VWAP" : "VWAP n/a";
+      const h1 = e20 != null && e50 != null ? (e20 > e50 ? "1h bull" : "1h bear") : "1h n/a";
+
+      lines.push(`${symbol} ${last.close.toFixed(1)} (${chgPct >= 0 ? "+" : ""}${chgPct.toFixed(2)}%) | range ${lo.toFixed(0)}–${hi.toFixed(0)} | ${vsVwap} ${futVwap ? `@${futVwap.toFixed(0)}` : ""} | ST ${st?.toLowerCase() ?? "-"} | ${h1}`);
+      if (st === "BULLISH" && futVwap && last.close > futVwap) biases.push("bullish");
+      else if (st === "BEARISH" && futVwap && last.close < futVwap) biases.push("bearish");
+      else biases.push("mixed");
+    }
+
+    const allBull = biases.length > 0 && biases.every((b) => b === "bullish");
+    const allBear = biases.length > 0 && biases.every((b) => b === "bearish");
+    lines.push(`Trend read: ${allBull ? "bullish — price above VWAP with bullish Supertrend" : allBear ? "bearish — price below VWAP with bearish Supertrend" : "mixed/chop — no clear trend agreement"}`);
+    lines.push("Signals fire only on 15m Supertrend flips, 09:45–14:30 IST. Price/volume data only — no news feed.");
+    await this.telegram.send(lines.join("\n"));
   }
 
   /**

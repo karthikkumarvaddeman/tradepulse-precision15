@@ -39,6 +39,7 @@
       <div class="sub">NIFTY + SENSEX · completed 15-minute signals · manual execution only</div>
     </div>
     <div>
+      <button id="kiteLoginBtn" onclick="kiteLogin()" style="margin-right:8px">Kite login</button>
       <span id="modePill" class="pill warn">CONNECTING…</span>
       <span id="clock" class="pill muted" style="margin-left:8px"></span>
     </div>
@@ -62,6 +63,17 @@
 const $ = (id) => document.getElementById(id);
 const fmt = (iso) => iso ? new Date(iso).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: true }) : "—";
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function kiteLogin() {
+  try {
+    const r = await fetch("/api/kite/login-url");
+    const j = await r.json();
+    if (j.url) window.open(j.url, "_blank");
+    else alert(j.error || "Kite login URL unavailable.");
+  } catch {
+    alert("Backend unavailable — is the server running?");
+  }
+}
 
 function actionClass(action) {
   return action === "BUY_CALL" ? "buy-call" : action === "BUY_PUT" ? "buy-put" : "hold";

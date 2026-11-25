@@ -11,6 +11,15 @@ export type AltStrategyMode = "vwap" | "gapfade" | "combo" | "combo-late" | "com
  *
  * Backtested ~positive on 6 months of NIFTY/SENSEX data; still unproven live.
  */
+/** Supertrend(14,3) flip at a specific index of a completed-candle series. */
+export function supertrendFlipAt(series: Candle[], idx: number): AltAction {
+  if (idx < 1) return null;
+  const nowSt = supertrend(series.slice(0, idx + 1), 14, 3);
+  const prevSt = supertrend(series.slice(0, idx), 14, 3);
+  if (!nowSt || !prevSt || nowSt === prevSt) return null;
+  return nowSt === "BULLISH" ? "BUY_CALL" : "BUY_PUT";
+}
+
 export function altEntryAction(
   mode: AltStrategyMode,
   dayCandles: { open: number; high: number; low: number; close: number }[],
@@ -52,10 +61,7 @@ export function altEntryAction(
   if (mode === "supertrend") {
     const series = (history15m?.length ? history15m : dayCandles) as Candle[];
     if (series.length < 15) return null;
-    const nowSt = supertrend(series, 14, 3);
-    const prevSt = supertrend(series.slice(0, -1), 14, 3);
-    if (!nowSt || !prevSt || nowSt === prevSt) return null;
-    return nowSt === "BULLISH" ? "BUY_CALL" : "BUY_PUT";
+    return supertrendFlipAt(series, series.length - 1);
   }
 
   // gapfade: fade >0.4% opening gaps back toward previous day's close.

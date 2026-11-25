@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { NextFunction, Request, Response } from "express";
 import { env, capitalConfigured, isLiveOrderEnabled, kiteConfigured } from "./config/env.js";
+import { kiteLoginUrl } from "./broker/kiteClient.js";
 import { SignalStore } from "./application/signalStore.js";
 import { SignalEngine } from "./application/signalEngine.js";
 
@@ -65,6 +66,11 @@ app.post("/api/signals/:id/dismiss", requireLocalToken, (req, res) => {
     : res.status(404).json({ error: "Active recommendation not found or already handled." });
 });
 
+app.get("/api/kite/login-url", (_req, res) => {
+  if (!env.KITE_API_KEY) return res.status(400).json({ error: "KITE_API_KEY is not set in .env." });
+  res.json({ url: kiteLoginUrl(env.KITE_API_KEY) });
+});
+
 app.get("/callback", (req, res) => {
   const requestToken = typeof req.query.request_token === "string" ? req.query.request_token : "";
   res.type("html").send(`<!doctype html><html><head><meta charset="utf-8"><title>Kite login</title>
@@ -76,7 +82,8 @@ code{color:#c4b5fd;word-break:break-all}.muted{color:#94a3b8}</style></head><bod
 ${requestToken
   ? `<p>Request token received. Click below to exchange it for today's access token.</p>
      <p class="muted">Token: <code>${requestToken.replace(/[<>&"]/g, "")}</code></p>
-     <button onclick="exchange()">Complete login</button><div id="result" style="margin-top:14px"></div>
+     <div id="result" style="margin-top:14px">Exchanging token…</div>
+     <button onclick="exchange()" style="margin-top:10px">Retry login</button>
      <script>
      async function exchange(){
        const r = await fetch('/api/kite/callback',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({request_token:${JSON.stringify(requestToken).replace(/</g, "\\u003c")}})});
@@ -88,6 +95,7 @@ ${requestToken
          : 'Failed: ' + String(j.error ?? 'Unknown error');
        document.getElementById('result').replaceChildren(message);
      }
+     exchange();
      </script>`
   : `<p class="muted">No request_token in URL. Log in via the Kite Connect URL first.</p>`}
 </div></body></html>`);
